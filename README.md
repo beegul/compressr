@@ -2,8 +2,8 @@
 
 **Video in. DVD out.** A personal Windows desktop app for turning local videos
 and permitted YouTube videos into one continuous autoplay DVD-Video, without a separate
-HandBrake step or codec settings. This is source for personal use, not a packaged
-or signed public release.
+HandBrake step or codec settings. Includes a local personal portable packaging
+command, not an installer or signed public release.
 
 ## Current verification status
 
@@ -21,6 +21,34 @@ files matched the saved ISO, and actual on-disc PAL video/audio decoded correctl
 Standalone-player playback and full-disc/dual-layer burns remain untested.
 
 ## Setup and launch
+
+**Already have the personal portable ZIP?** Extract the entire ZIP, then
+double-click **Compressr.exe** inside the Compressr folder. Keep its `tools`,
+runtime DLLs and license notices together. No .NET installation, SDK, command
+or dependency download is needed to run it. Local conversion works offline;
+YouTube still requires internet. Windows 10/11 **x64** is the supported target.
+Use a writable output location and allow several GB of temporary disk space.
+
+To reproduce the bundle from source, first complete dependency setup below, then:
+
+```powershell
+.\scripts\Package-Portable.ps1
+```
+
+This publishes an untrimmed self-contained win-x64 app and copies the processing
+tools, authoring DLLs and upstream notices into a fresh ignored
+`artifacts\portable-<timestamp>\Compressr` folder plus ZIP.
+Use `-OutputDirectory 'C:\path with spaces\Compressr'` for a new destination or
+`-SkipZip` for just the folder. Packaging requires the SDK and internet for
+uncached license notices; launching the result requires neither.
+Tool discovery starts beside the executable, independent of working directory.
+`COMPRESSR_TOOLS`, if explicitly set, still overrides the bundle.
+Settings, previews, downloads and job folders remain per-user in
+`%LOCALAPPDATA%\Compressr`; moving the bundle does not move that working state.
+Third-party binaries are never committed. This is a local personal bundle,
+not a public redistribution or signing/release workflow.
+
+### Running from source
 
 Requires Windows 10/11, the **.NET 8 SDK**, internet access for dependency setup,
 and several GB of free space (allow about three times the disc capacity plus the
@@ -79,7 +107,8 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    disc is required. The app converts, authors, builds and validates the image,
    and verifies its DVD files against the authored output before saving it.
    DVD folder output is still available, but the burn-later action takes an ISO.
-5. Later, start the app with `.\scripts\Run.ps1`, insert a compatible blank DVD,
+5. Later, double-click portable **Compressr.exe** (or use `.\scripts\Run.ps1`
+   from source), insert a compatible blank DVD,
    select the writer (use **Refresh drives** after connecting one). **Check disc**
    reports the current format, blank state and exact available bytes without
    writing, erasing or ejecting it. Then click

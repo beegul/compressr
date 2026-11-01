@@ -5,6 +5,7 @@
     <UseWPF>true</UseWPF>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AssemblyName>Compressr</AssemblyName>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="..\Compressr.Core\Compressr.Core.csproj" /></ItemGroup>
 </Project>

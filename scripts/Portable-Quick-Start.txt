@@ -1,0 +1,39 @@
+COMPRESSR - Video in. DVD out.
+
+Extract the whole ZIP first, then double-click Compressr.exe.
+Keep the entire folder together, including tools, DLLs and licenses.
+No installer, .NET, SDK, PowerShell command or first-launch download is needed.
+This bundle is for personal use on Windows 10/11 x64, not a signed public release.
+
+PREPARE NOW
+Drop your video files onto the app or add permitted YouTube links.
+Arrange videos with Move up / Move down. Whole videos play in that order.
+Choose PAL for UK players, and SingleLayer for a typical 4.7 GB DVD.
+Click Prepare DVD / save ISO and choose a writable location.
+No blank disc is required. Keep the saved ISO; it is ready to burn later.
+
+BURN LATER
+Open Compressr.exe, insert a compatible BLANK DVD and select the writer.
+Click Burn prepared DVD, select your saved ISO and confirm image and drive.
+No original videos are required. Compressr never erases a used disc.
+Do not close the app or disconnect the drive during burning/read-back.
+DVD+RW support varies between standalone players; test on your own player.
+
+Use only media you own or have permission to download/copy.
+YouTube needs internet; local conversion and burning do not.
+YouTube playback timestamps are ignored; there is no trimming.
+Allow several GB of free space, roughly three times disc capacity plus sources.
+Settings/downloads/jobs are stored in %LOCALAPPDATA%\Compressr, not this folder.
+The folder is movable, but settings and temporary work are per Windows user.
+If COMPRESSR_TOOLS is set, it overrides bundled tools; unset it for normal use.
+
+UPSTREAM SOFTWARE
+The self-contained Microsoft .NET runtime includes its license/notices here.
+FFmpeg/ffprobe: GPL v3 or later, https://www.gyan.dev/ffmpeg/builds/
+Source and build details: https://github.com/FFmpeg/FFmpeg and Gyan builds.
+yt-dlp: https://github.com/yt-dlp/yt-dlp (see licenses, including executable dependencies).
+Deno: https://github.com/denoland/deno (MIT and third-party components).
+DVDStyler portable/dvdauthor/mkisofs and DLL notices remain under tools:
+https://www.dvdstyler.org/ and https://portableapps.com/apps/music_video/dvdstyler_portable
+This is a local personal bundle. It is not a redistribution/compliance-reviewed release.
+To update YouTube tools, rebuild the bundle using the repository setup/package scripts.
