@@ -19,6 +19,27 @@ unsupported types, insufficient capacity and detection failures are shown explic
 Detection is a snapshot, not a reservation: the exact image and current media are
 checked again before confirmation and immediately before writing.
 
+Every burn includes a read-only **Disc preflight**: recorder support, DVD type,
+blankness, blocking status and capacity. A supported blank DVD needs no separate
+Windows formatting. Nonblank write-once DVD-R/+R (including dual-layer) cannot be
+erased or reused: insert a new blank disc. For supported DVD-RW/+RW, **Prepare /
+erase disc…** is available after inspection. It identifies the drive and exact
+media type, checks capacity before asking, and requires a separate **default-No**
+destructive confirmation. All existing contents will be removed. Automatic
+output and Check disc never erase; declining preparation never starts a burn.
+The same preparation permission is requested if a manually requested burn needs
+rewritable-disc erasure. Burning still requires its own separate confirmation.
+
+Preparation uses Windows IMAPI2's optical-media erase API, which selects the
+appropriate plus/minus-RW operation, not Explorer / Live File System formatting.
+It is a quick erase, **not a secure data wipe**. The drive/media must support
+erasure and media-change detection; inaccessible, busy/locked, protected,
+damaged or changed media stop the operation. The disc is reinspected after erase;
+success is shown only when blankness, status and capacity pass. IMAPI erasure
+cannot be cancelled once started: wait for it and its postcheck to finish.
+Failure never starts a burn or silently switches output; a completed erasure
+cannot be undone even if later preparation or burning fails.
+
 The **Save to** path is visible before preparing. **Change…** opens the native
 ISO save dialog (or a parent-folder picker for DVD folders); cancelling keeps the
 previous path. Existing ISO replacement requires the native overwrite confirmation.
@@ -217,7 +238,9 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    prepared image. There is no download, conversion or authoring during this action.
    The single ISO is self-contained: original videos, downloads and job folders
    are not needed, even after restarting the app or moving the ISO elsewhere.
-   Burning requires an explicit confirmation; Compressr never erases media.
+   Burning requires an explicit confirmation. To reuse a supported rewritable
+   disc, check it first, then use **Prepare / erase disc…** and separately confirm
+   destruction of its contents. A write-once disc always needs to be blank.
 
 YouTube downloads are capped at 1080p where that rendition exists: ample source
 resolution for a DVD without an unnecessary 4K download.
@@ -225,10 +248,11 @@ YouTube `t=`, `start=` or `#t=` playback timestamps are incidental: **the whole
 video is used**, not just the portion after that timestamp. There is no trimming
 feature. Every listed source is included in full.
 The stages report download, two-pass conversion with percentage, authoring,
-image creation, burn/finalisation and file read-back verification. Download,
+image creation, disc preflight/preparation, burn/finalisation and file read-back verification. Download,
 authoring, imaging and burning currently show indeterminate progress rather
 than invented percentages. Cancellation kills child tool processes before
-burning; writing/finalising and read-back must finish before the app closes.
+burning; disc erasure, writing/finalising and their verification must finish
+before the app closes. Cancelling later work does not undo a confirmed erasure.
 
 ## DVD behaviour and limits
 
@@ -262,7 +286,9 @@ burning; writing/finalising and read-back must finish before the app closes.
   that starts the single title without a menu. `mkisofs -dvd-video -udf` supplies
   DVD file ordering/padding and a DVD-Video UDF 1.02 / ISO9660 image, rather than
   a generic data disc containing an MPEG file. Windows IMAPI2 writes that image
-  with `ForceMediaToBeClosed=true`.
+  with `ForceMediaToBeClosed=true`. This authoring/image/finalisation pipeline
+  supplies the DVD-Video format; formatting a disc as a Windows data filesystem
+  is neither required nor an alternative to DVD authoring.
 - Opening a prepared image checks complete sector/volume sizes, UDF 1.02
   descriptors and checksums, ISO file extents, uppercase DVD navigation, matching
   IFO backups, MPEG-2 PAL/NTSC title attributes and every VOB sector's pack header.
@@ -335,6 +361,12 @@ invalid capacities, blocking IMAPI media states and the actual attached DVD+RW's
 single-layer boundary. Typed automatic-output checks cover ready, absent,
 undersized and failed media detection, disc removal/replacement, capacity changes
 and preservation of explicit output choices.
+Preparation regressions use typed fakes only: blank +/-R/RW, nonblank write-once,
+separate erase/burn permissions, refusal/cancellation, erase API failure,
+unsuccessful postchecks, capacity changes, identical-media replacement detection,
+unsupported/protected media and concurrent/busy operations. No automated test
+calls the physical erase API. Real-device checks are read-only; actual erasure
+and subsequent plus/minus-RW writes have not been hardware-verified.
 Authored IFO tests check a zero region-prohibition mask and the actual first-play
 command bytes jumping to title 1, rather than relying only on the author XML.
 The PowerShell harness mounts each generated ISO and checks navigation files and

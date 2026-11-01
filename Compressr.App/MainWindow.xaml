@@ -114,6 +114,9 @@
                   <Button Content="Check disc" Click="CheckDisc" DockPanel.Dock="Right" VerticalAlignment="Top" FontSize="12" Padding="8,4" MinHeight="28" Margin="8,0,0,0"/>
                   <TextBlock Text="{Binding ElementName=DiscStatus, Path=Text}" FontSize="12" Foreground="{StaticResource Muted}" MaxHeight="110" TextTrimming="CharacterEllipsis" ToolTip="{Binding ElementName=DiscStatus, Path=Text}"/>
                 </DockPanel>
+                <Button x:Name="SourcePrepareDiscButton" Content="Prepare / erase disc…" Click="PrepareDisc" IsEnabled="False"
+                        HorizontalAlignment="Left" FontSize="12" Padding="8,4" MinHeight="28" Margin="0,8,0,0"
+                        ToolTip="Only supported rewritable DVDs can be erased. Separate confirmation is required."/>
                 <StackPanel x:Name="SaveOptions" Margin="0,12,0,0">
                   <DockPanel><Button Content="Change…" Click="ChooseDestination" DockPanel.Dock="Right" Padding="8,4" MinHeight="28"/><TextBlock Text="Save to" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
                   <TextBox x:Name="SavePath" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,6,0,0" AutomationProperties.Name="DVD save destination"/>
@@ -164,7 +167,10 @@
                   <ComboBox x:Name="Drives" DisplayMemberPath="Label" AutomationProperties.Name="DVD writer" SelectionChanged="DriveChanged"/>
                   <WrapPanel Margin="0,8,0,8"><Button Content="Refresh drives" Click="RefreshDrives" Margin="0,0,8,0"/><Button Content="Check disc" Click="CheckDisc"/></WrapPanel>
                   <TextBlock x:Name="DiscStatus" Text="Checking for a blank writable DVD…" Foreground="{StaticResource Muted}" AutomationProperties.LiveSetting="Polite"/>
-                  <TextBlock Text="Automatic output checks the selected disc capacity. Prepared ISOs are checked against their exact size. Every write is rechecked and requires confirmation." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
+                  <Button x:Name="PrepareDiscButton" Content="Prepare / erase disc…" Click="PrepareDisc" IsEnabled="False" HorizontalAlignment="Left" Margin="0,12,0,0"
+                          ToolTip="Only supported rewritable DVDs can be erased. Separate confirmation is required."/>
+                  <TextBlock Text="Blank DVD: checked before burning; no Windows formatting needed. Rewritable DVD: erasure requires separate confirmation and removes all contents. Write-once DVD: use a new blank disc." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
+                  <TextBlock Text="One ISO per disc. Every write rechecks readiness and size, asks for confirmation, then finalises and verifies the DVD." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
                 </StackPanel>
               </WrapPanel>
             </Border>

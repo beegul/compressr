@@ -16,6 +16,8 @@ public partial class MainWindow : Window
     private readonly string stateDirectory;
     private CancellationTokenSource? cancellation;
     private bool burning;
+    private bool erasing;
+    private readonly DiscPreparation discPreparation = new();
     private bool initialized;
     private bool updatingOutput;
     private bool updatingDrives;
@@ -124,12 +126,23 @@ public partial class MainWindow : Window
             DvdDrive? selected = Drives.SelectedItem as DvdDrive;
             IReadOnlyList<DvdDrive> drives = [];
             var results = new Dictionary<string, DiscReadiness>();
+            var inspections = new Dictionary<string, DiscInspection>();
             await RunStaAsync(() =>
             {
                 drives = enumerate ? DiscWriter.GetDrives() : selected == null ? [] : [selected];
                 foreach (var drive in drives)
                 {
-                    try { results[drive.Id] = DiscReadiness.Assess(DiscWriter.Inspect(drive), required); }
+                    try
+                    {
+                        var inspection = DiscWriter.InspectPreparation(drive);
+                        inspections[drive.Id] = inspection;
+                        results[drive.Id] = DiscReadiness.Assess(inspection.Media, required);
+                        if (!results[drive.Id].Ready && inspection.NeedsErase)
+                        {
+                            inspection.CheckForPreparation(required);
+                            results[drive.Id] = new(false, $"{inspection.Media.Name}: preparation required. Erasing removes all contents and needs separate confirmation. Automatic will not erase.");
+                        }
+                    }
                     catch (Exception ex) { results[drive.Id] = DiscReadiness.Failed($"{drive.Label}: {ex.Message}"); }
                 }
             });
@@ -150,6 +163,7 @@ public partial class MainWindow : Window
             selected = Drives.SelectedItem as DvdDrive;
             readiness = selected != null && results.TryGetValue(selected.Id, out var result) ? result : DiscReadiness.NoWriter;
             DiscStatus.Text = readiness.Detail;
+            SetPreparationAvailable(selected != null && inspections.TryGetValue(selected.Id, out var current) ? current : null);
             outputSelection.Apply(readiness);
             UpdateOutput();
             Stage.Text = "Disc checked (not written)";
@@ -162,6 +176,7 @@ public partial class MainWindow : Window
         catch (Exception ex)
         {
             readiness = DiscReadiness.Failed(ex.Message);
+            SetPreparationAvailable(null);
             DiscStatus.Text = readiness.Detail;
             outputSelection.Apply(readiness); UpdateOutput();
             Stage.Text = "Disc check failed"; Status.Text = readiness.Detail;
@@ -178,6 +193,94 @@ public partial class MainWindow : Window
     {
         outputSelection.UseAutomatic(readiness);
         UpdateOutput();
+    }
+    private void SetPreparationAvailable(DiscInspection? inspection)
+    {
+        bool available = false;
+        if (inspection?.NeedsErase == true)
+        {
+            try { inspection.CheckForPreparation(2048); available = true; }
+            catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException or OverflowException)
+            { System.Diagnostics.Trace.TraceInformation($"Disc preparation unavailable: {ex.Message}"); }
+        }
+        SourcePrepareDiscButton.IsEnabled = PrepareDiscButton.IsEnabled = available;
+    }
+
+    private async Task<bool> PreflightDiscAsync(DvdDrive? drive, long requiredBytes, CancellationToken token)
+    {
+        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer and refresh, or explicitly choose Save DVD-ready ISO.");
+        Stage.Text = "Disc preflight";
+        Status.Text = $"Checking {drive.Label}: media type, state and capacity. No disc is written or erased by this check.";
+        DiscInspection? latest = null;
+        DiscPreparationResult result;
+        try
+        {
+            result = await discPreparation.RunAsync(requiredBytes, async ct =>
+            {
+                ct.ThrowIfCancellationRequested();
+                await RunStaAsync(() => latest = DiscWriter.InspectPreparation(drive));
+                return latest ?? throw new InvalidOperationException("The writer returned no disc inspection.");
+            }, inspection =>
+            {
+                Stage.Text = "Preparation needs permission";
+                return MessageBox.Show(this,
+                    $"Prepare / erase {inspection.Media.Name} in {drive.Label}?\n\nALL existing contents on this disc will be removed. This cannot be undone. This is a quick optical-media erase, not a secure data wipe and not Windows / Live File System formatting.\n\nNo DVD will be burned by this permission. Burning requires a separate confirmation. IMAPI erasure cannot be cancelled once it starts.\n\nKeep this same disc in the drive. Erase it now?",
+                    "Confirm destructive disc preparation", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+            }, async (inspection, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                erasing = true; CancelButton.IsEnabled = false;
+                Stage.Text = "Preparing / erasing disc";
+                Status.Text = $"Erasing {inspection.Media.Name} in {drive.Label}. Do not remove the disc. This IMAPI stage cannot be cancelled; blankness and capacity will be checked afterward.";
+                Progress.IsIndeterminate = true;
+                await RunStaAsync(() => DiscWriter.Erase(drive, inspection, requiredBytes, ct));
+            }, token);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            readiness = DiscReadiness.Failed(ex.Message); DiscStatus.Text = readiness.Detail; SetPreparationAvailable(null);
+            throw;
+        }
+        finally { erasing = false; Progress.IsIndeterminate = false; CancelButton.IsEnabled = !burning; }
+        if (result == DiscPreparationResult.Declined)
+        {
+            Stage.Text = "Preparation declined";
+            Status.Text = "Nothing was erased or burned. Keep the existing disc contents, or insert a new blank DVD.";
+            return false;
+        }
+        var checkedDisc = latest ?? throw new InvalidOperationException("The writer returned no disc inspection.");
+        readiness = DiscReadiness.Assess(checkedDisc.Media, requiredBytes);
+        DiscStatus.Text = result == DiscPreparationResult.ErasedAndReady
+            ? $"Prepared and checked: {checkedDisc.Media.Summary}. Burning still requires confirmation."
+            : $"Preflight passed: {checkedDisc.Media.Summary}. No formatting or erasure needed.";
+        SetPreparationAvailable(checkedDisc);
+        Stage.Text = "Disc ready";
+        Status.Text = DiscStatus.Text;
+        return true;
+    }
+
+    private async void PrepareDisc(object sender, RoutedEventArgs e)
+    {
+        if (cancellation != null) return;
+        cancellation = new(); Busy(true);
+        try
+        {
+            long required = RequiredBurnBytes();
+            if (WorkspaceTabs.SelectedIndex == 1 && PreparedJobs.SelectedItem is PreparedJob job)
+            {
+                using var dvd = await PreparedDvd.OpenAsync(job.Path, Reporter(), cancellation.Token);
+                required = dvd.Length;
+                await PreflightDiscAsync(Drives.SelectedItem as DvdDrive, required, cancellation.Token);
+            }
+            else await PreflightDiscAsync(Drives.SelectedItem as DvdDrive, required, cancellation.Token);
+        }
+        catch (OperationCanceledException) { Stage.Text = "Preparation cancelled"; Status.Text = "Cancelled before erasure. No DVD was burned."; }
+        catch (Exception ex)
+        {
+            readiness = DiscReadiness.Failed(ex.Message); DiscStatus.Text = readiness.Detail; SetPreparationAvailable(null);
+            Stage.Text = "Disc not ready"; Status.Text = $"Disc preparation did not verify readiness: {ex.Message}\nNo DVD was burned. Check the disc before trying again.";
+        }
+        finally { cancellation.Dispose(); cancellation = null; erasing = false; Progress.IsIndeterminate = false; Busy(false); }
     }
     private void UpdateOutput()
     {
@@ -433,7 +536,7 @@ public partial class MainWindow : Window
     private void Busy(bool value)
     {
         Options.IsEnabled = !value; BurnOptions.IsEnabled = !value;
-        StartButton.IsEnabled = !value; CancelButton.IsEnabled = value && !burning;
+        StartButton.IsEnabled = !value; CancelButton.IsEnabled = value && !burning && !erasing;
     }
     private async void ShowPreview(object sender, RoutedEventArgs e) => await PreviewAsync();
     private async void Rotate(object sender, RoutedEventArgs e)
@@ -495,17 +598,16 @@ public partial class MainWindow : Window
         try
         {
             var token = cancellation.Token; var reporter = Reporter(); var tools = Tools();
+            var estimate = await EstimateAsync(tools, token);
+            _ = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
             if (output == OutputKind.Burn)
             {
                 if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer and refresh, or explicitly choose Save DVD-ready ISO.");
-                long requiredBytes = RequiredBurnBytes();
-                await RunStaAsync(() => DiscWriter.CheckBlank(drive, requiredBytes));
+                if (!await PreflightDiscAsync(drive, RequiredBurnBytes(), token)) return;
                 token.ThrowIfCancellationRequested();
             }
             if (output == OutputKind.Folder && Directory.Exists(destination))
                 throw new IOException("The DVD output folder already exists. Change the save location to create a new DVD folder.");
-            var estimate = await EstimateAsync(tools, token);
-            _ = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
             var clips = new List<VideoClip>();
             foreach (var item in videos)
             {
@@ -607,9 +709,10 @@ public partial class MainWindow : Window
         using var prepared = await PreparedDvd.OpenAsync(path, reporter, token);
         token.ThrowIfCancellationRequested();
         if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, refresh, then select this ISO again. The saved ISO is unchanged.");
-        await RunStaAsync(() => DiscWriter.CheckBlank(drive, prepared.Length));
+        if (!await PreflightDiscAsync(drive, prepared.Length, token))
+        { SetPreparedStatus(path, "Preparation declined · not written"); return; }
         token.ThrowIfCancellationRequested();
-        if (MessageBox.Show(this, $"Write and finalise {Path.GetFileName(prepared.Path)} ({prepared.Length / 1_000_000.0:F1} MB) to {drive.Label}?\nOne ISO will be written to one disc. This cannot be undone. Compressr never erases discs.",
+        if (MessageBox.Show(this, $"Write and finalise {Path.GetFileName(prepared.Path)} ({prepared.Length / 1_000_000.0:F1} MB) to {drive.Label}?\nOne ISO will be written to one disc. This cannot be undone. Disc preflight has passed; this write will not erase existing contents.",
             "Confirm DVD burning", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
         {
             Stage.Text = "Not written"; Status.Text = $"Burn declined. The prepared ISO is unchanged at {path}. Output choice unchanged.";
@@ -632,10 +735,10 @@ public partial class MainWindow : Window
         var thread = new Thread(() => { try { action(); completion.SetResult(); } catch (Exception ex) { completion.SetException(ex); } });
         thread.SetApartmentState(ApartmentState.STA); thread.Start(); return completion.Task;
     }
-    private void Cancel(object sender, RoutedEventArgs e) { if (!burning) cancellation?.Cancel(); }
+    private void Cancel(object sender, RoutedEventArgs e) { if (!burning && !erasing) cancellation?.Cancel(); }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
-        if (cancellation != null) { e.Cancel = true; Status.Text = burning ? "Wait until disc writing and verification finish." : "Cancel the current operation before closing."; return; }
+        if (cancellation != null) { e.Cancel = true; Status.Text = erasing ? "Wait until disc erasure and readiness verification finish." : burning ? "Wait until disc writing and verification finish." : "Cancel the current operation before closing."; return; }
         foreach (string file in previewFiles)
         {
             try { File.Delete(file); }

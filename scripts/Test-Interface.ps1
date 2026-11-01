@@ -73,7 +73,7 @@ try {
     foreach ($name in @('Source', 'Inputs', 'Estimate', 'Preview', 'RotationLabel', 'Standard', 'Capacity',
         'Output', 'Drives', 'Options', 'BurnOptions', 'StartButton', 'CancelButton', 'Stage', 'Progress', 'Status',
         'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
-        'BurnSelectedButton', 'RemovePreparedButton')) {
+        'BurnSelectedButton', 'RemovePreparedButton', 'PrepareDiscButton', 'SourcePrepareDiscButton')) {
         Check ($null -ne $window.FindName($name)) "Retained $name"
         $ui[$name] = $window.FindName($name)
     }
@@ -104,6 +104,24 @@ try {
     $ui.Output.SelectedIndex = 0
     Check ($ui.SavePath.Text -eq $chosenPath) 'Output switching preserves chosen ISO destination'
     Check ($ui.Inputs.Items.Count -eq 0) 'Empty queue'
+    $blank = [Compressr.Core.DvdMedia]::new(7, $true, $true, $true, $true, 2295104, 2295104, 2)
+    $recorded = [Compressr.Core.DvdMedia]::new(7, $true, $true, $false, $false, 2295104, 2295104, 1)
+    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($blank, $true, 'fake:1', $null))
+    Check (!$ui.PrepareDiscButton.IsEnabled -and !$ui.SourcePrepareDiscButton.IsEnabled) 'Blank DVD needs no erase action'
+    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($recorded, $true, 'fake:1', $null))
+    Check ($ui.PrepareDiscButton.IsEnabled -and $ui.SourcePrepareDiscButton.IsEnabled) 'Supported nonblank RW exposes explicit preparation in both workflows'
+    Check ($ui.Output.SelectedIndex -eq 0) 'Making erasure available never changes output or starts a burn'
+    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($recorded, $false, $null, 'unsupported'))
+    Check (!$ui.PrepareDiscButton.IsEnabled -and !$ui.SourcePrepareDiscButton.IsEnabled) 'Unsupported erasure stays disabled'
+    $eraseField = $window.GetType().GetField('erasing', [Reflection.BindingFlags]'Instance,NonPublic')
+    $eraseField.SetValue($window, $true)
+    Invoke-Handler 'Busy' @($true)
+    Check (!$ui.CancelButton.IsEnabled -and !$ui.Options.IsEnabled -and !$ui.BurnOptions.IsEnabled) 'Synchronous IMAPI erasure prevents cancel and concurrent UI operations'
+    $eraseField.SetValue($window, $false)
+    Invoke-Handler 'Busy' @($false)
+    Invoke-Handler 'PrepareDisc' @($null, [Windows.RoutedEventArgs]::new())
+    Await-Idle
+    Check ($ui.Stage.Text -eq 'Disc not ready' -and $ui.Status.Text.Contains('No DVD writer selected')) 'Preparation without a writer fails explicitly without confirmation'
     Layout 1008 921
     Screenshot 'interface-empty.png'
     Invoke-Handler 'AddVideo' @('https://youtu.be/first')

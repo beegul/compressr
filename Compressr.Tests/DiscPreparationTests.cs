@@ -1,0 +1,180 @@
+using Compressr.Core;
+
+internal static class DiscPreparationTests
+{
+    public static async Task RunAsync(Action<bool, string> check)
+    {
+        var blank = new DvdMedia(7, true, true, true, true, 2295104, 2295104);
+        var recorded = new DiscInspection(blank with
+        {
+            PhysicallyBlank = false, HeuristicallyBlank = false, FreeSectors = 0, CurrentStatus = 0x5000
+        }, true, "writer:media-change-1");
+
+        async Task RejectAsync<T>(FakeDisc fake, string name, CancellationToken token = default) where T : Exception
+        {
+            try { await fake.RunAsync(token); }
+            catch (T) { check(fake.Burns == 0, name + ": no burn"); return; }
+            throw new Exception("FAIL: expected " + typeof(T).Name + ": " + name);
+        }
+
+        foreach (int type in new[] { 6, 7, 8, 9, 10, 11, 13 })
+        {
+            var fake = new FakeDisc(new(blank with { Type = type }, false, null));
+            check(await fake.RunAsync() == DiscPreparationResult.Ready, "blank DVD preflight passes " + type);
+            check(fake.Erases == 0 && fake.ErasePrompts == 0 && fake.Burns == 1 && fake.BurnPrompts == 1,
+                "blank disc never erased or prompted for formatting " + type);
+        }
+        foreach (int type in new[] { 6, 8, 9, 11 })
+        {
+            var fake = new FakeDisc(recorded with { Media = recorded.Media with { Type = type } });
+            await RejectAsync<InvalidOperationException>(fake, "nonblank write-once " + type);
+            check(fake.ErasePrompts == 0 && fake.Erases == 0, "write-once cannot offer destructive preparation");
+        }
+        foreach (int type in new[] { 7, 10, 13 })
+        {
+            var fake = new FakeDisc(recorded with { Media = recorded.Media with { Type = type } });
+            check(await fake.RunAsync() == DiscPreparationResult.ErasedAndReady, "supported RW rechecked after preparation " + type);
+            check(fake.Erases == 1 && fake.Inspections == 3 && fake.ErasePrompts == 1 && fake.BurnPrompts == 1 && fake.Burns == 1,
+                "RW uses separate destructive and burn permissions " + type);
+        }
+        var requiresErase = new FakeDisc(new(blank with { CurrentStatus = 0x800 }, true, "writer:1"));
+        check(await requiresErase.RunAsync() == DiscPreparationResult.ErasedAndReady && requiresErase.ErasePrompts == 1,
+            "nominal blank RW with erase-required status is explicitly prepared, not silently written");
+        var declined = new FakeDisc(recorded) { ErasePermission = false };
+        check(await declined.RunAsync() == DiscPreparationResult.Declined && declined.Erases == 0 &&
+            declined.Burns == 0 && declined.BurnPrompts == 0, "declining erasure leaves disc alone and never starts burn");
+        var declinedBurn = new FakeDisc(recorded) { BurnPermission = false };
+        check(await declinedBurn.RunAsync() == DiscPreparationResult.ErasedAndReady && declinedBurn.Erases == 1 &&
+            declinedBurn.Burns == 0, "erase permission is not burn permission");
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var fake = new FakeDisc(recorded) { OnErasePrompt = cancellation.Cancel };
+            await RejectAsync<OperationCanceledException>(fake, "cancel after permission before erasure", cancellation.Token);
+            check(fake.Erases == 0, "cancel before API leaves medium unchanged");
+        }
+        using (var cancellation = new CancellationTokenSource())
+        {
+            cancellation.Cancel();
+            var fake = new FakeDisc(recorded);
+            await RejectAsync<OperationCanceledException>(fake, "cancel before inspection", cancellation.Token);
+            check(fake.Inspections == 0 && fake.Erases == 0 && fake.ErasePrompts == 0, "pre-cancel does nothing");
+        }
+        var oversized = new FakeDisc(recorded) { RequiredBytes = blank.AvailableBytes + 2048 };
+        await RejectAsync<InvalidOperationException>(oversized, "image too large before erasure");
+        check(oversized.ErasePrompts == 0 && oversized.Erases == 0, "capacity failure occurs before destructive question");
+        foreach (var invalid in new[]
+        {
+            recorded with { EraseSupported = false, EraseUnavailable = "unsupported erase API" },
+            recorded with { MediaIdentity = null },
+            recorded with { Media = recorded.Media with { Type = 4 } },
+            recorded with { Media = recorded.Media with { Type = 3 } },
+            recorded with { Media = recorded.Media with { Type = 5 } },
+            recorded with { Media = recorded.Media with { RecorderSupported = false } },
+            recorded with { Media = recorded.Media with { TotalSectors = 0 } },
+            recorded with { Media = recorded.Media with { CurrentStatus = 0x2000 } },
+            recorded with { Media = recorded.Media with { CurrentStatus = 0x400 } },
+            recorded with { Media = recorded.Media with { CurrentStatus = 0x8000 } },
+            recorded with { Media = recorded.Media with { CurrentStatus = 0 } }
+        })
+        {
+            var fake = new FakeDisc(invalid);
+            await RejectAsync<InvalidOperationException>(fake, "unsupported or unsafe preparation");
+            check(fake.ErasePrompts == 0 && fake.Erases == 0, "unsafe media never offered erasure");
+        }
+        foreach (var changed in new[]
+        {
+            recorded with { MediaIdentity = "writer:media-change-2" },
+            recorded with { Media = recorded.Media with { Type = 10 } },
+            recorded with { Media = recorded.Media with { TotalSectors = 100 } },
+            recorded with { Media = recorded.Media with { Type = 0 } },
+            new DiscInspection(blank, true, recorded.MediaIdentity),
+            recorded with { EraseSupported = false }
+        })
+        {
+            var fake = new FakeDisc(recorded) { Replacement = changed };
+            await RejectAsync<InvalidOperationException>(fake, "changed medium after permission");
+            check(fake.Erases == 0, "changed disc never erased, including identical media with new change counter");
+        }
+        var eraseFailure = new FakeDisc(recorded) { EraseFailure = new IOException("IMAPI erase failure") };
+        await RejectAsync<IOException>(eraseFailure, "erase API failure");
+        check(eraseFailure.Erases == 1 && eraseFailure.BurnPrompts == 0, "failed erase never continues");
+        var stillRecorded = new FakeDisc(recorded) { PostErase = recorded };
+        await RejectAsync<InvalidOperationException>(stillRecorded, "erase reported success but medium not blank");
+        var shrunk = new FakeDisc(recorded)
+        {
+            RequiredBytes = 4096,
+            PostErase = new(blank with { TotalSectors = 1, FreeSectors = 1 }, true, "writer:2")
+        };
+        await RejectAsync<InvalidOperationException>(shrunk, "post-erase capacity changed");
+        var busy = new FakeDisc(recorded) { InspectFailure = new IOException("Writer busy or locked") };
+        await RejectAsync<IOException>(busy, "busy or inaccessible writer");
+        check(busy.Erases == 0 && busy.ErasePrompts == 0, "busy writer cannot erase");
+        var checkFailure = new FakeDisc(recorded) { PostInspectionFailure = new IOException("Media removed after erase") };
+        await RejectAsync<IOException>(checkFailure, "postcheck failure is not readiness success");
+
+        var automatic = new DvdOutputSelection();
+        automatic.Apply(DiscReadiness.Assess(recorded.Media, 2048));
+        check(automatic.Selected == OutputKind.Iso, "automatic never chooses destructive preparation");
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var fake = new FakeDisc(recorded) { OnErase = cancellation.Cancel };
+            check(await fake.RunAsync(cancellation.Token) == DiscPreparationResult.ErasedAndReady &&
+                fake.Inspections == 3, "noncancelable IMAPI stage is always postchecked even if cancellation arrives");
+        }
+        var preparation = new DiscPreparation();
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = preparation.RunAsync(2048, async _ => { entered.SetResult(); await release.Task; return new(blank, false, null); },
+            _ => throw new Exception("Unexpected confirmation"), (_, _) => throw new Exception("Unexpected erase"), CancellationToken.None);
+        await entered.Task;
+        try
+        {
+            await preparation.RunAsync(2048, _ => Task.FromResult(recorded), _ => true, (_, _) => Task.CompletedTask, CancellationToken.None);
+            throw new Exception("FAIL: concurrent preparation accepted");
+        }
+        catch (InvalidOperationException) { check(true, "concurrent preparation rejected without API call"); }
+        release.SetResult();
+        check(await first == DiscPreparationResult.Ready, "first operation completes after busy rejection");
+    }
+
+    private sealed class FakeDisc(DiscInspection initial)
+    {
+        public int Inspections, Erases, ErasePrompts, BurnPrompts, Burns;
+        public bool ErasePermission = true, BurnPermission = true;
+        public long RequiredBytes = 2048;
+        public Action? OnErasePrompt, OnErase;
+        public Exception? InspectFailure, EraseFailure, PostInspectionFailure;
+        public DiscInspection? Replacement, PostErase;
+        private readonly DiscPreparation preparation = new();
+
+        public async Task<DiscPreparationResult> RunAsync(CancellationToken token = default)
+        {
+            var result = await preparation.RunAsync(RequiredBytes, ct =>
+            {
+                ct.ThrowIfCancellationRequested();
+                Inspections++;
+                if (InspectFailure != null) throw InspectFailure;
+                if (Erases > 0 && PostInspectionFailure != null) throw PostInspectionFailure;
+                return Task.FromResult(Erases > 0 ? PostErase ?? initial with
+                {
+                    Media = initial.Media with { PhysicallyBlank = true, HeuristicallyBlank = true,
+                        FreeSectors = initial.Media.TotalSectors, CurrentStatus = 2, MediaSupported = true }
+                } : Inspections > 1 ? Replacement ?? initial : initial);
+            }, _ => { ErasePrompts++; OnErasePrompt?.Invoke(); return ErasePermission; }, (approved, ct) =>
+            {
+                ct.ThrowIfCancellationRequested();
+                approved.CheckUnchanged(Replacement ?? initial, RequiredBytes);
+                Erases++;
+                if (EraseFailure != null) throw EraseFailure;
+                OnErase?.Invoke();
+                return Task.CompletedTask;
+            }, token);
+            if (result != DiscPreparationResult.Declined)
+            {
+                BurnPrompts++;
+                if (BurnPermission && !token.IsCancellationRequested) Burns++;
+            }
+            return result;
+        }
+    }
+}

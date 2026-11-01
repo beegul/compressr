@@ -139,6 +139,8 @@ selection.UseAutomatic(DiscReadiness.NoWriter);
 Check(selection.Selected == OutputKind.Iso && !selection.IsManual, "user can resume automatic selection");
 Throws<ArgumentOutOfRangeException>(() => selection.Choose((OutputKind)99), "invalid output selection");
 Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
+await DiscPreparationTests.RunAsync(Check);
+Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
 
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
