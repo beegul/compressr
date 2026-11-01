@@ -70,6 +70,13 @@ var concert = landscape with { Duration = 10472 };
 Check(DvdPlan.Create(concert, TelevisionSystem.PAL, DiscSize.SingleLayer, 0).VideoBitrate == 3_063_000, "concert metadata total single-layer estimate");
 Check(DvdPlan.Create(concert, TelevisionSystem.PAL, DiscSize.DualLayer, 0).VideoBitrate == 5_748_000, "concert metadata total dual-layer estimate");
 Console.WriteLine($"PASS: {assertions} unit/playlist assertions");
+long singleCapacity = DvdPlan.DiscCapacity(DiscSize.SingleLayer) / 2048 * 2048;
+PreparedDvd.CheckCapacity(singleCapacity, singleCapacity);
+Check(true, "image fits exact media boundary");
+Throws<InvalidOperationException>(() => PreparedDvd.CheckCapacity(singleCapacity + 2048, singleCapacity), "image exceeds media boundary");
+Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(2049, singleCapacity), "partial image sector");
+Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(0, singleCapacity), "empty image");
+Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(DvdPlan.DiscCapacity(DiscSize.DualLayer) + 2048, long.MaxValue), "oversized image");
 
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
@@ -195,5 +202,78 @@ foreach (var test in new[] { (Name: "stitch-pal", System: TelevisionSystem.PAL, 
     File.WriteAllText(Path.Combine(work, "ffprobe.json"),
         await tools.RunAsync(tools.Ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", title], token));
     Console.WriteLine($"PASS: {test.Name}: clip order, complete duration, geometry and silence");
+}
+async Task RejectAsync<T>(string path, string message, CancellationToken cancellation = default) where T : Exception
+{
+    try { using var rejected = await PreparedDvd.OpenAsync(path, progress, cancellation); }
+    catch (T) { Check(true, message); return; }
+    throw new Exception("FAIL: accepted " + message);
+}
+foreach (string iso in Directory.GetFiles(root, "*.iso"))
+{
+    using var prepared = await PreparedDvd.OpenAsync(iso, progress, token);
+    string work = Path.Combine(root, Path.GetFileNameWithoutExtension(iso));
+    await prepared.VerifyDirectoryAsync(Path.Combine(work, "dvd", "VIDEO_TS"), progress, token);
+    Check(prepared.Files.Count >= 5, "prepared image navigation and title files: " + iso);
+    Throws<IOException>(() => { using var overwrite = new FileStream(iso, FileMode.Open, FileAccess.Write); }, "image locked against changes");
+    string independent = Path.Combine(root, "readback", Path.GetFileNameWithoutExtension(iso), "VIDEO_TS");
+    Directory.CreateDirectory(independent);
+    foreach (string file in Directory.GetFiles(Path.Combine(work, "dvd", "VIDEO_TS")))
+        File.Copy(file, Path.Combine(independent, Path.GetFileName(file)));
+}
+// Hide every source and original job before reopening saved images, as in a later app run.
+foreach (string source in Directory.GetFiles(root, "*.mp4")) File.Move(source, source + ".unavailable");
+foreach (string iso in Directory.GetFiles(root, "*.iso"))
+{
+    string work = Path.Combine(root, Path.GetFileNameWithoutExtension(iso));
+    Directory.Move(work, work + ".unavailable");
+    try
+    {
+        using var reopened = await PreparedDvd.OpenAsync(iso, progress, token);
+        await reopened.VerifyDirectoryAsync(Path.Combine(root, "readback", Path.GetFileNameWithoutExtension(iso), "VIDEO_TS"), progress, token);
+        Check(true, "saved ISO reusable without source/jobs: " + iso);
+    }
+    finally { Directory.Move(work + ".unavailable", work); }
+}
+foreach (string source in Directory.GetFiles(root, "*.mp4.unavailable"))
+    File.Move(source, source[..^".unavailable".Length]);
+string dataFolder = Path.Combine(root, "not-a-dvd");
+Directory.CreateDirectory(dataFolder);
+File.WriteAllText(Path.Combine(dataFolder, "data.txt"), "Not a DVD video title.");
+string dataIso = Path.Combine(root, "not-a-dvd.test");
+await tools.RunAsync(tools.Mkisofs, ["-udf", "-o", dataIso, dataFolder], token);
+await RejectAsync<InvalidDataException>(dataIso, "real generic UDF data ISO");
+File.Delete(dataIso);
+string validIso = Path.Combine(root, "stitch-pal.iso");
+using (var dvd = await PreparedDvd.OpenAsync(validIso, progress, token))
+{
+    string invalid = Path.Combine(root, "invalid-image.test");
+    async Task CorruptAsync(long offset, byte[] bytes, string name)
+    {
+        File.Copy(validIso, invalid, true);
+        using (var file = new FileStream(invalid, FileMode.Open, FileAccess.Write))
+        { file.Position = offset; file.Write(bytes); }
+        await RejectAsync<InvalidDataException>(invalid, name);
+    }
+    await CorruptAsync(16 * 2048 + 1, [0], "non-ISO file");
+    await CorruptAsync(16 * 2048 + 80, [0, 0, 0, 0], "inconsistent volume size");
+    await CorruptAsync(256 * 2048, [0, 0], "missing UDF anchor");
+    await CorruptAsync(dvd.Files.Single(f => f.Name == "VIDEO_TS.IFO").Offset, [0], "invalid DVD navigation");
+    await CorruptAsync(dvd.Files.Single(f => f.Name == "VIDEO_TS.BUP").Offset + 100, [255], "damaged navigation backup");
+    await CorruptAsync(dvd.Files.Single(f => f.Name == "VTS_01_1.VOB").Offset, [255], "non-DVD program stream");
+    await CorruptAsync(dvd.Files.Single(f => f.Name == "VTS_01_1.VOB").Offset + 2048, [255], "damaged later DVD sector");
+    await CorruptAsync(dvd.Files.Single(f => f.Name == "VTS_01_0.IFO").Offset + 512, [0], "incompatible DVD video attributes");
+    File.Copy(validIso, invalid, true);
+    using (var file = new FileStream(invalid, FileMode.Open, FileAccess.Write)) file.SetLength(dvd.Length - 2048);
+    await RejectAsync<InvalidDataException>(invalid, "sector-aligned truncation");
+    using (var file = new FileStream(invalid, FileMode.Open, FileAccess.Write)) file.SetLength(2049);
+    await RejectAsync<InvalidDataException>(invalid, "partial sector truncation");
+    File.Delete(invalid);
+    await RejectAsync<OperationCanceledException>(validIso, "inspection cancellation", new CancellationToken(true));
+    string readback = Path.Combine(root, "readback", "stitch-pal", "VIDEO_TS");
+    string damagedFile = Path.Combine(readback, "VTS_01_1.VOB");
+    using (var file = new FileStream(damagedFile, FileMode.Open, FileAccess.Write)) file.WriteByte(255);
+    try { await dvd.VerifyDirectoryAsync(readback, progress, token); throw new Exception("FAIL: damaged read-back accepted"); }
+    catch (IOException) { Check(true, "read-back corruption explicitly rejected"); }
 }
 Console.WriteLine($"PASS: {assertions} total assertions; generated ISO/VIDEO_TS results in {root}");

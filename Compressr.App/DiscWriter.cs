@@ -1,7 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
-using System.Security.Cryptography;
 using Compressr.Core;
 
 namespace Compressr.App;
@@ -59,15 +58,14 @@ public static class DiscWriter
                 throw new InvalidOperationException("The inserted medium is not a supported DVD.");
             if (!(bool)format.MediaHeuristicallyBlank && !(bool)format.MediaPhysicallyBlank)
                 throw new InvalidOperationException("The DVD is not blank. Compressr never erases or overwrites discs.");
-            if ((long)format.FreeSectorsOnMedia * 2048 < requiredBytes)
-                throw new InvalidOperationException("The inserted disc has insufficient free capacity. Choose the correct disc capacity or insert a larger DVD.");
+            PreparedDvd.CheckCapacity(requiredBytes, (long)format.FreeSectorsOnMedia * 2048);
         }
         finally { Release(formatObject); Release(recorderObject); }
     }
 
-    public static void Burn(string iso, DvdDrive drive, IProgress<StageProgress> progress)
+    public static void Burn(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress)
     {
-        CheckBlank(drive, new FileInfo(iso).Length);
+        CheckBlank(drive, dvd.Length);
         object? recorderObject = null, formatObject = null;
         IStream? stream = null;
         try
@@ -78,32 +76,21 @@ public static class DiscWriter
             format.Recorder = recorder;
             format.ClientName = "Compressr";
             format.ForceMediaToBeClosed = true;
-            Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(iso, 0x20, 0, false, null, out stream));
+            Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(dvd.Path, 0x20, 0, false, null, out stream));
             progress.Report(new("Burn", null, "Writing and finalising the disc. Do not remove it. This stage cannot be cancelled."));
             format.Write(stream);
         }
         finally { Release(stream); Release(formatObject); Release(recorderObject); }
     }
 
-    public static async Task VerifyAsync(string dvd, DvdDrive drive, IProgress<StageProgress> progress)
+    public static async Task VerifyAsync(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress)
     {
         progress.Report(new("Verify", null, "Waiting for the finalised disc to mount…"));
         string target = Path.Combine(drive.Mount, "VIDEO_TS");
         for (int i = 0; i < 30 && !Directory.Exists(target); i++) await Task.Delay(1000);
         if (drive.Mount.Length == 0 || !Directory.Exists(target))
             throw new IOException("Burn completed, but Windows did not mount the disc for verification. The disc is not verified.");
-        var files = Directory.GetFiles(Path.Combine(dvd, "VIDEO_TS"));
-        for (int i = 0; i < files.Length; i++)
-        {
-            progress.Report(new("Verify", (double)i / files.Length, $"Reading back {Path.GetFileName(files[i])}…"));
-            await using var original = File.OpenRead(files[i]);
-            await using var burned = File.OpenRead(Path.Combine(target, Path.GetFileName(files[i])));
-            byte[] originalHash = await SHA256.HashDataAsync(original);
-            byte[] burnedHash = await SHA256.HashDataAsync(burned);
-            if (original.Length != burned.Length ||
-                !CryptographicOperations.FixedTimeEquals(originalHash, burnedHash))
-                throw new IOException($"Read-back verification failed for {Path.GetFileName(files[i])}. Do not rely on this disc.");
-        }
+        await dvd.VerifyDirectoryAsync(target, progress, CancellationToken.None);
     }
 
     [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, PreserveSig = true)]

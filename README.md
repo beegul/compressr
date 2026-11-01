@@ -11,7 +11,9 @@ The desktop app builds with **zero warnings/errors**. Generated-media checks
 cover landscape, silent rotated portrait, PAL/NTSC, manual rotation and overlong
 input and half-D1 encoding, plus ordered stitching with mixed formats and audio.
 Eight authored ISOs have been mounted and their VIDEO_TS hashes matched.
-The focused/integration run passed 91 assertions.
+Saved ISOs also reopen and verify independently of original source/job folders.
+The focused/integration run passed 133 assertions, including image rejection,
+capacity boundaries, image locking and read-back corruption.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. Physical burning has **not** been performed.
 
@@ -53,7 +55,7 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
 
 1. Drop one or more files, browse (multi-select supported), or paste an HTTPS
    YouTube link and click **Add**. Files and links can be mixed. A single
-   pending file/link is also added automatically on Preview, Check fit or Make DVD,
+   pending file/link is also added automatically on Preview, Check fit or Prepare DVD,
    preserving the quick single-video workflow. Only download/copy
    content you own or have permission to use; no DRM or login bypass is provided.
 2. Use **Move up**, **Move down** and **Remove** to arrange parts. They play
@@ -66,12 +68,22 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
 3. Use **Check fit** for combined duration and single-/dual-layer bitrate estimates.
    For YouTube it requests public metadata only, without downloading the videos.
    A metadata failure makes fit unknown rather than assuming a duration.
-   Make DVD checks fit again before downloads, then reprobes the downloaded
+   Prepare DVD checks fit again before downloads, then reprobes the downloaded
    originals before any conversion. Overlong parts are never silently dropped.
-4. Choose PAL (default, remembered) or NTSC, single-layer or dual-layer capacity,
-   and ISO, DVD folder, or a detected writer. **Make DVD** runs the pipeline.
-   Burning requires a blank writable DVD and an explicit confirmation. Compressr
-   never erases media. ISO is the safe default for trying it without a writer.
+4. Choose PAL (default, remembered) or NTSC and single-layer or dual-layer capacity.
+   Leave **Prepare as** on **DVD-ready ISO (burn later)**, click
+   **Prepare DVD / save ISO**, and choose where to save it. No drive or inserted
+   disc is required. The app converts, authors, builds and validates the image,
+   and verifies its DVD files against the authored output before saving it.
+   DVD folder output is still available, but the burn-later action takes an ISO.
+5. Later, start the app with `.\scripts\Run.ps1`, insert a compatible blank DVD,
+   select the writer (use **Refresh drives** after connecting one), and click
+   **Burn prepared DVD…** to open the saved ISO. Confirm the named image and drive.
+   No input videos need to be added, and PAL/capacity controls do not alter a
+   prepared image. There is no download, conversion or authoring during this action.
+   The single ISO is self-contained: original videos, downloads and job folders
+   are not needed, even after restarting the app or moving the ISO elsewhere.
+   Burning requires an explicit confirmation; Compressr never erases media.
 
 YouTube downloads are capped at 1080p where that rendition exists: ample source
 resolution for a DVD without an unnecessary 4K download.
@@ -103,15 +115,25 @@ burning; writing/finalising and read-back must finish before the app closes.
   stops **before encoding**, suggesting dual-layer or splitting. This is a
   conservative quality floor, not a guarantee every source will look good.
 - Actual authored and image sizes are checked too; real blank-media capacity is
-  checked before conversion and again before writing. Not every burner supports
+  checked before writing and again immediately before IMAPI writes. Not every burner supports
   every DVD type; dual-layer requires compatible media and hardware.
 - `dvdauthor` produces uppercase VIDEO_TS navigation and a first-play command
   that starts the single title without a menu. `mkisofs -dvd-video -udf` supplies
   DVD file ordering/padding and a DVD-Video UDF 1.02 / ISO9660 image, rather than
   a generic data disc containing an MPEG file. Windows IMAPI2 writes that image
   with `ForceMediaToBeClosed=true`.
-- Burn verification compares all VIDEO_TS file sizes and SHA-256 hashes with the
-  mounted disc. It is file-level read-back, not an exhaustive sector scan or
+- Opening a prepared image checks complete sector/volume sizes, UDF 1.02
+  descriptors and checksums, ISO file extents, uppercase DVD navigation, matching
+  IFO backups, MPEG-2 PAL/NTSC title attributes and every VOB sector's pack header.
+  It supports Compressr's single-title/no-menu layout, not arbitrary data ISOs
+  or all third-party authored DVDs. Invalid/truncated/oversized/unsupported images
+  fail before writing. Inspection reads all DVD files and can be cancelled.
+  The ISO is locked against writes/replacement through inspection and burning.
+  Structural validation is not a full decode of every frame and cannot detect
+  every possible damaged source or prove player compatibility.
+- Burn verification compares all VIDEO_TS file sizes and SHA-256 hashes from the
+  saved ISO with the mounted disc, not with retained job files.
+  It is file-level read-back, not an exhaustive sector scan or
   proof of playback on a particular set-top player. Verification failure is
   shown explicitly even after a burn has completed.
 - One continuous title only; no chapter/menu editor, subtitles, DRM, source
@@ -144,6 +166,11 @@ clips with different lengths, 24/30/60 fps, non-square pixels, phone rotation,
 44.1/32 kHz mono audio and a silent middle part. They check decoded clip order,
 full combined duration, normalized output, portrait bars and silent audio after
 real conversion and authoring.
+Saved-image tests reopen all eight images while original videos and job folders
+are unavailable, comparing against independent read-back copies. They reject
+damaged ISO/UDF/navigation/program-stream headers, mismatched backups, truncation
+and unsupported video attributes; test exact media boundaries, cancellation,
+image write-locking and corrupted read-back files. None call IMAPI's write operation.
 The PowerShell harness mounts each generated ISO and checks navigation files and
 all VIDEO_TS hashes against the authored tree. It never writes or erases a
 physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
@@ -171,6 +198,6 @@ Total: **2:54:32** (10,472 seconds), including all of part 4 despite its `t=1082
 With the current overhead reserves and 192 kbps audio, it fits single-layer at
 **3.063 Mbps** video, or dual-layer at **5.748 Mbps**, both full-D1.
 Dual-layer provides appreciably more quality headroom for concert motion/detail.
-These are metadata-based fit estimates, not an assessment of this concert's
+**This exact concert remains untested end-to-end.** These are metadata-based fit estimates, not an assessment of this concert's
 visual quality or proof of a burned disc. Availability/metadata may change.
 Only generated clips and permitted media are used for the actual pipeline tests.
