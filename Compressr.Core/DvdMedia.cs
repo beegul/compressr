@@ -1,7 +1,7 @@
 namespace Compressr.Core;
 
 public sealed record DvdMedia(int Type, bool RecorderSupported, bool MediaSupported,
-    bool PhysicallyBlank, bool HeuristicallyBlank, long TotalSectors, long FreeSectors)
+    bool PhysicallyBlank, bool HeuristicallyBlank, long TotalSectors, long FreeSectors, int CurrentStatus = 2)
 {
     public string Name => Type switch
     {
@@ -25,6 +25,9 @@ public sealed record DvdMedia(int Type, bool RecorderSupported, bool MediaSuppor
             throw new InvalidOperationException("The inserted medium is not a supported recordable DVD.");
         if (!Blank)
             throw new InvalidOperationException("The DVD is not blank. Compressr never erases or overwrites discs.");
+        // IMAPI_FORMAT2_DATA_MEDIA_STATE: all unsupported flags block a write, even on a nominally blank disc.
+        if (CurrentStatus == 0 || (CurrentStatus & 0xFC00) != 0)
+            throw new InvalidOperationException($"The DVD has a blocking or unknown media status (0x{CurrentStatus:X}). It may be damaged, finalized, write-protected or require erasing. Use another blank DVD; Compressr never erases discs.");
         if (TotalSectors <= 0 || FreeSectors <= 0 || FreeSectors > TotalSectors)
             throw new InvalidOperationException("The drive reported invalid DVD capacity. Refresh or reconnect the drive before trying again.");
         PreparedDvd.CheckCapacity(requiredBytes, AvailableBytes);

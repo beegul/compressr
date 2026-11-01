@@ -54,18 +54,22 @@ public static class DiscWriter
             recorder.InitializeDiscRecorder(drive.Id);
             dynamic format = formatObject = Com("IMAPI2.MsftDiscFormat2Data");
             format.Recorder = recorder;
-            bool supported = (bool)format.IsRecorderSupported(recorder) && (bool)format.IsCurrentMediaSupported(recorder);
-            if (!supported) throw new InvalidOperationException("Insert a supported writable DVD in the selected drive.");
-            return new((int)format.CurrentPhysicalMediaType, true, true,
-                (bool)format.MediaPhysicallyBlank, (bool)format.MediaHeuristicallyBlank,
-                (long)format.TotalSectorsOnMedia, (long)format.FreeSectorsOnMedia);
+            return ReadMedia(recorder, format);
         }
         finally { Release(formatObject); Release(recorderObject); }
     }
 
+    private static DvdMedia ReadMedia(dynamic recorder, dynamic format)
+    {
+        bool supported = (bool)format.IsRecorderSupported(recorder) && (bool)format.IsCurrentMediaSupported(recorder);
+        if (!supported) throw new InvalidOperationException("Insert a supported writable DVD in the selected drive.");
+        return new((int)format.CurrentPhysicalMediaType, true, true,
+            (bool)format.MediaPhysicallyBlank, (bool)format.MediaHeuristicallyBlank,
+            (long)format.TotalSectorsOnMedia, (long)format.FreeSectorsOnMedia, (int)format.CurrentMediaStatus);
+    }
+
     public static void Burn(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress)
     {
-        CheckBlank(drive, dvd.Length);
         object? recorderObject = null, formatObject = null;
         IStream? stream = null;
         try
@@ -77,6 +81,7 @@ public static class DiscWriter
             format.ClientName = "Compressr";
             format.ForceMediaToBeClosed = true;
             Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(dvd.Path, 0x20, 0, false, null, out stream));
+            ReadMedia(recorder, format).Check(dvd.Length);
             progress.Report(new("Burn", null, "Writing and finalising the disc. Do not remove it. This stage cannot be cancelled."));
             format.Write(stream);
         }

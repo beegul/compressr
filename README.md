@@ -9,7 +9,28 @@ The main window follows **your videos → your DVD → Prepare DVD**. Browse or
 drop one or several files, or add a permitted YouTube link; the queue is the
 playback order. Orientation preview and rotation stay beside the queue. The DVD
 panel contains PAL/NTSC, 4.7/8.5 GB capacity, ISO/folder output and Check fit.
-**Burn a saved ISO later** expands the separate writer, Check disc and burn controls.
+**Burn prepared DVDs** is a separate tab for saved ISOs, the writer and Check disc.
+The output starts on **Prepare and burn DVD** only when a read-only startup check
+finds a compatible blank DVD large enough for the selected capacity; otherwise it
+starts on **Save DVD-ready ISO**. Refresh/check-disc can update this automatic
+suggestion, but never changes a manual output choice. **Use automatic** restores
+automatic suggestions. Media removal, nonblank/protected/finalized/damaged media,
+unsupported types, insufficient capacity and detection failures are shown explicitly.
+Detection is a snapshot, not a reservation: the exact image and current media are
+checked again before confirmation and immediately before writing.
+
+The **Save to** path is visible before preparing. **Change…** opens the native
+ISO save dialog (or a parent-folder picker for DVD folders); cancelling keeps the
+previous path. Existing ISO replacement requires the native overwrite confirmation.
+Preparation does not silently switch to saving after a declined or failed burn.
+
+Each successful ISO preparation is added to **Prepared DVDs**. Add multiple
+existing ISOs with **Add prepared ISOs…**, then select **one** and burn it to **one**
+blank DVD. Repeat with another file and a new blank disc. The list survives app
+restarts; files are validated when added and again before burning. **Remove from
+list** never deletes an ISO. Source videos above are concatenated into one DVD;
+prepared ISOs are distinct disc jobs, never concatenated or written as multisession
+data, and the list is not an automatic multi-disc/bulk conversion scheduler.
 Preparation and status remain visible while the content scrolls on smaller screens.
 The interface uses the native Segoe UI family, a restrained teal accent, readable
 sentence-case labels and keyboard focus indicators, following
@@ -176,17 +197,22 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    Prepare DVD checks fit again before downloads, then reprobes the downloaded
    originals before any conversion. Overlong parts are never silently dropped.
 4. Choose PAL (default, remembered) or NTSC and single-layer or dual-layer capacity.
-   Leave **Prepare as** on **DVD-ready ISO (burn later)**, click
-   **Prepare DVD / save ISO**, and choose where to save it. No drive or inserted
+   Choose **Save DVD-ready ISO** and check the visible **Save to** path (use
+   **Change…** to choose a filename), then click **Prepare DVD**. No drive or inserted
    disc is required. The app converts, authors, builds and validates the image,
    and verifies its DVD files against the authored output before saving it.
    DVD folder output is still available, but the burn-later action takes an ISO.
+   If a suitable blank disc is detected, automatic output instead selects
+   **Prepare and burn DVD**; preparation stages a validated ISO and asks for
+   confirmation before writing. A declined/failed burn keeps that staged ISO
+   in the prepared list with its location/status, not as a silent file-output fallback.
 5. Later, double-click portable **Compressr.exe** (or use `.\scripts\Run.ps1`
    from source), insert a compatible blank DVD,
    select the writer (use **Refresh drives** after connecting one). **Check disc**
    reports the current format, blank state and exact available bytes without
    writing, erasing or ejecting it. Then click
-   **Burn prepared DVD…** to open the saved ISO. Confirm the named image and drive.
+   **Burn prepared DVDs**, add the saved ISO(s), select one and click
+   **Burn selected DVD…**. Confirm the named image and drive.
    No input videos need to be added, and PAL/capacity controls do not alter a
    prepared image. There is no download, conversion or authoring during this action.
    The single ISO is self-contained: original videos, downloads and job folders
@@ -280,7 +306,12 @@ Native interface checks cover retained controls and handlers, empty/single/multi
 queues, reordering/removal, busy/idle state, output choices, burn-later access,
 compact-window layout and text-token contrast. An optional `-ScreenshotDirectory`
 captures offscreen WPF renders; these complement, rather than replace, inspection
-of the running window. No URL is downloaded and no physical disc is written.
+of the running window. Supply `-PreparedIsoPaths` with an array of generated ISO
+paths to check validation, selection and persisted jobs. Supply `-SourceVideoPaths`
+with generated video paths to exercise source-to-ISO and source-to-folder
+preparation, list restoration and explicit failure without a selected writer.
+These checks use isolated temporary app state. No URL is downloaded and no
+physical disc is written.
 
 The dependency-free console test harness checks exact fit boundaries for both
 capacities, invalid inputs, bitrate/mux budget, sample aspect, metadata/manual
@@ -300,7 +331,10 @@ damaged ISO/UDF/navigation/program-stream headers, mismatched backups, truncatio
 and unsupported video attributes; test exact media boundaries, cancellation,
 image write-locking and corrupted read-back files. None call IMAPI's write operation.
 Media checks cover supported recordable types, nonblank rewritable rejection,
-invalid capacities and the actual attached DVD+RW's single-layer boundary.
+invalid capacities, blocking IMAPI media states and the actual attached DVD+RW's
+single-layer boundary. Typed automatic-output checks cover ready, absent,
+undersized and failed media detection, disc removal/replacement, capacity changes
+and preservation of explicit output choices.
 Authored IFO tests check a zero region-prohibition mask and the actual first-play
 command bytes jumping to title 1, rather than relying only on the author XML.
 The PowerShell harness mounts each generated ISO and checks navigation files and

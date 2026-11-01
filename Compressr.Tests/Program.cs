@@ -95,6 +95,51 @@ Throws<InvalidOperationException>(() => (attached with { MediaSupported = false 
 Throws<InvalidOperationException>(() => (attached with { FreeSectors = -1 }).Check(2048), "invalid free sectors");
 Throws<InvalidOperationException>(() => (attached with { FreeSectors = attached.TotalSectors + 1 }).Check(2048), "inconsistent capacity");
 
+foreach (int status in new[] { 0, 0x400, 0x800, 0x1000, 0x2000, 0x4000, 0x8000, 0x2002 })
+{
+    var blocked = attached with { CurrentStatus = status };
+    Throws<InvalidOperationException>(() => blocked.Check(2048), $"blocking IMAPI state {status:X}");
+    Check(!DiscReadiness.Assess(blocked, 2048).Ready, $"blocking state is never an automatic burn default {status:X}");
+}
+foreach (var invalidMedia in new[]
+{
+    attached with { Type = 0 }, attached with { Type = 5 }, attached with { Type = 4 },
+    attached with { PhysicallyBlank = false, HeuristicallyBlank = false },
+    attached with { RecorderSupported = false }, attached with { MediaSupported = false },
+    attached with { FreeSectors = 0 }, attached with { FreeSectors = long.MaxValue },
+    attached with { FreeSectors = attached.TotalSectors + 1 }
+})
+    Check(!DiscReadiness.Assess(invalidMedia, 2048).Ready, "invalid, missing or inaccessible media is not ready");
+var ready = DiscReadiness.Assess(attached, singleCapacity);
+var tooSmall = DiscReadiness.Assess(attached, DvdPlan.DiscCapacity(DiscSize.DualLayer) / 2048 * 2048);
+Check(ready.Ready && !tooSmall.Ready && tooSmall.Detail.Contains("capacity"), "readiness uses required byte capacity");
+Check(!DiscReadiness.NoWriter.Ready && !DiscReadiness.Failed("access denied").Ready &&
+    DiscReadiness.Failed("access denied").Detail.Contains("access denied"), "no writer and failed detection are explicit");
+var selection = new DvdOutputSelection();
+Check(selection.Selected == OutputKind.Iso && !selection.IsManual, "safe initial file default");
+selection.Apply(ready);
+Check(selection.Selected == OutputKind.Burn, "ready blank DVD automatically selects burn");
+foreach (var absent in new[] { DiscReadiness.NoWriter, tooSmall, DiscReadiness.Failed("device removed") })
+{
+    selection.Apply(absent);
+    Check(selection.Selected == OutputKind.Iso, "automatic falls back to ISO before operation for unready media");
+    selection.Apply(ready);
+    Check(selection.Selected == OutputKind.Burn, "replacement ready media refreshes automatic choice");
+}
+foreach (OutputKind manual in Enum.GetValues<OutputKind>())
+{
+    selection.Choose(manual);
+    foreach (var state in new[] { ready, tooSmall, DiscReadiness.NoWriter, DiscReadiness.Failed("access denied") })
+    {
+        selection.Apply(state);
+        Check(selection.Selected == manual && selection.IsManual, "explicit output survives refresh/removal/failure: " + manual);
+    }
+}
+selection.UseAutomatic(DiscReadiness.NoWriter);
+Check(selection.Selected == OutputKind.Iso && !selection.IsManual, "user can resume automatic selection");
+Throws<ArgumentOutOfRangeException>(() => selection.Choose((OutputKind)99), "invalid output selection");
+Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
+
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
 Directory.CreateDirectory(root);

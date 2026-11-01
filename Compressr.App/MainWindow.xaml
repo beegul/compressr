@@ -14,9 +14,10 @@
         </StackPanel>
       </DockPanel>
     </Border>
-    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <StackPanel Margin="24,24,24,16">
-        <WrapPanel x:Name="Options">
+    <TabControl x:Name="WorkspaceTabs" Grid.Row="1" SelectionChanged="WorkspaceChanged" Padding="0" BorderThickness="0" Margin="16,12,16,0">
+      <TabItem Header="Prepare from videos" Padding="16,8">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <WrapPanel x:Name="Options" Margin="8,20,8,16">
           <StackPanel Width="560" Margin="0,0,24,20">
             <TextBlock Text="Your videos" FontSize="20" FontWeight="SemiBold"/>
             <TextBlock Text="Drop files here, browse, or paste a YouTube link." Foreground="{StaticResource Muted}" Margin="0,6,0,16"/>
@@ -92,7 +93,7 @@
                   </StackPanel>
                   <StackPanel Grid.Column="2">
                     <Label Content="Disc capacity" Target="{Binding ElementName=Capacity}" Padding="0" Margin="0,0,0,6"/>
-                    <ComboBox x:Name="Capacity" AutomationProperties.Name="Disc capacity">
+                    <ComboBox x:Name="Capacity" AutomationProperties.Name="Disc capacity" SelectionChanged="CapacityChanged">
                       <ComboBox.ItemTemplate>
                         <DataTemplate>
                           <TextBlock>
@@ -103,8 +104,20 @@
                     </ComboBox>
                   </StackPanel>
                 </Grid>
-                <Label Content="Save as" Target="{Binding ElementName=Output}" Padding="0" Margin="0,16,0,6"/>
-                <ComboBox x:Name="Output" AutomationProperties.Name="Save DVD as"/>
+                <DockPanel Margin="0,16,0,6">
+                  <Button Content="Use automatic" Click="UseAutomaticOutput" DockPanel.Dock="Right" FontSize="12" Padding="8,4" MinHeight="28"/>
+                  <Label Content="Output" Target="{Binding ElementName=Output}" Padding="0" VerticalAlignment="Center"/>
+                </DockPanel>
+                <ComboBox x:Name="Output" AutomationProperties.Name="DVD output" SelectionChanged="OutputChanged"/>
+                <TextBlock x:Name="OutputChoiceHint" Foreground="{StaticResource Muted}" FontSize="12" Margin="0,6,0,0"/>
+                <DockPanel Margin="0,12,0,0">
+                  <Button Content="Check disc" Click="CheckDisc" DockPanel.Dock="Right" VerticalAlignment="Top" FontSize="12" Padding="8,4" MinHeight="28" Margin="8,0,0,0"/>
+                  <TextBlock Text="{Binding ElementName=DiscStatus, Path=Text}" FontSize="12" Foreground="{StaticResource Muted}" MaxHeight="110" TextTrimming="CharacterEllipsis" ToolTip="{Binding ElementName=DiscStatus, Path=Text}"/>
+                </DockPanel>
+                <StackPanel x:Name="SaveOptions" Margin="0,12,0,0">
+                  <DockPanel><Button Content="Change…" Click="ChooseDestination" DockPanel.Dock="Right" Padding="8,4" MinHeight="28"/><TextBlock Text="Save to" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
+                  <TextBox x:Name="SavePath" IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,6,0,0" AutomationProperties.Name="DVD save destination"/>
+                </StackPanel>
                 <Border BorderBrush="#B6C5CE" BorderThickness="0,1,0,0" Margin="0,20,0,0" Padding="0,16,0,0">
                   <StackPanel>
                     <DockPanel><Button Content="Check _fit" Click="CheckFit" DockPanel.Dock="Right" Padding="12,7"/><TextBlock Text="Will it fit?" FontWeight="SemiBold" VerticalAlignment="Center"/></DockPanel>
@@ -113,20 +126,52 @@
                 </Border>
               </StackPanel>
             </Border>
-            <Expander Header="Burn a saved ISO later" Margin="0,20,0,0" IsExpanded="False">
-              <StackPanel x:Name="BurnOptions" Margin="0,12,0,0">
-                <TextBlock Text="Open a prepared ISO. No original videos needed." Foreground="{StaticResource Muted}" Margin="0,0,0,12"/>
-                <Label Content="DVD writer" Target="{Binding ElementName=Drives}" Padding="0" Margin="0,0,0,6"/>
-                <ComboBox x:Name="Drives" DisplayMemberPath="Label" AutomationProperties.Name="DVD writer"/>
-                <WrapPanel Margin="0,8,0,8"><Button Content="Refresh drives" Click="RefreshDrives" Margin="0,0,8,0"/><Button Content="Check disc" Click="CheckDisc"/></WrapPanel>
-                <Button Content="Burn prepared DVD…" Click="BurnPrepared"/>
-              </StackPanel>
-            </Expander>
             <TextBlock Text="Only download and copy videos you own or have permission to use." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,20,0,0"/>
           </StackPanel>
-        </WrapPanel>
-      </StackPanel>
-    </ScrollViewer>
+          </WrapPanel>
+        </ScrollViewer>
+      </TabItem>
+      <TabItem Header="Burn prepared DVDs" Padding="16,8">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel x:Name="BurnOptions" Margin="8,20,8,16">
+            <Border>
+              <WrapPanel>
+                <StackPanel Width="560" Margin="0,0,24,16">
+                  <DockPanel>
+                    <Button Content="Add prepared _ISOs…" Click="AddPrepared" DockPanel.Dock="Right" Padding="12,7"/>
+                    <TextBlock Text="Prepared DVDs" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                  </DockPanel>
+                  <TextBlock Text="One ISO = one disc job. Select one to burn; repeat with a new blank disc." Foreground="{StaticResource Muted}" Margin="0,6,0,12"/>
+                  <TextBlock x:Name="PreparedListNotice" Text="The list is saved between runs. Removing an entry never deletes its file." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
+                  <ListBox x:Name="PreparedJobs" Height="140" SelectionChanged="PreparedSelected" AutomationProperties.Name="Prepared DVD jobs" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                    <ListBox.ItemTemplate>
+                      <DataTemplate>
+                        <StackPanel ToolTip="{Binding Path}">
+                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding Status}" FontSize="12" Foreground="{StaticResource Muted}"/>
+                        </StackPanel>
+                      </DataTemplate>
+                    </ListBox.ItemTemplate>
+                  </ListBox>
+                  <TextBox x:Name="PreparedPath" Text="Add saved ISO files, or prepare one above. Original videos are not needed." IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,8" AutomationProperties.Name="Selected prepared DVD path"/>
+                  <WrapPanel>
+                    <Button x:Name="BurnSelectedButton" Content="Burn selected DVD…" Click="BurnPrepared" IsEnabled="False" Margin="0,0,8,0"/>
+                    <Button x:Name="RemovePreparedButton" Content="Remove from list" Click="RemovePrepared" IsEnabled="False"/>
+                  </WrapPanel>
+                </StackPanel>
+                <StackPanel Width="344" Margin="0,0,0,16">
+                  <Label Content="DVD writer" Target="{Binding ElementName=Drives}" Padding="0" Margin="0,0,0,6"/>
+                  <ComboBox x:Name="Drives" DisplayMemberPath="Label" AutomationProperties.Name="DVD writer" SelectionChanged="DriveChanged"/>
+                  <WrapPanel Margin="0,8,0,8"><Button Content="Refresh drives" Click="RefreshDrives" Margin="0,0,8,0"/><Button Content="Check disc" Click="CheckDisc"/></WrapPanel>
+                  <TextBlock x:Name="DiscStatus" Text="Checking for a blank writable DVD…" Foreground="{StaticResource Muted}" AutomationProperties.LiveSetting="Polite"/>
+                  <TextBlock Text="Automatic output checks the selected disc capacity. Prepared ISOs are checked against their exact size. Every write is rechecked and requires confirmation." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
+                </StackPanel>
+              </WrapPanel>
+            </Border>
+          </StackPanel>
+        </ScrollViewer>
+      </TabItem>
+    </TabControl>
     <Border Grid.Row="2" Background="{StaticResource Surface}" BorderBrush="#B6C5CE" BorderThickness="0,1,0,0" Padding="24,16">
       <Grid>
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="24"/><ColumnDefinition Width="228"/></Grid.ColumnDefinitions>

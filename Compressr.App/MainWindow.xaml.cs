@@ -13,10 +13,22 @@ namespace Compressr.App;
 
 public partial class MainWindow : Window
 {
-    private readonly string stateDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Compressr");
+    private readonly string stateDirectory;
     private CancellationTokenSource? cancellation;
     private bool burning;
     private bool initialized;
+    private bool updatingOutput;
+    private bool updatingDrives;
+    private readonly DvdOutputSelection outputSelection = new();
+    private DiscReadiness readiness = DiscReadiness.NoWriter;
+    private string isoDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Compressr.iso");
+    private string folderDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}");
+    private sealed record PreparedJob(string Path, string Status)
+    {
+        public string Name => System.IO.Path.GetFileName(Path);
+        public override string ToString() => Name;
+    }
+    private readonly ObservableCollection<PreparedJob> preparedJobs = [];
     private int rotation;
     private sealed class InputVideo(string input)
     {
@@ -29,8 +41,11 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<InputVideo> videos = [];
     private readonly List<string> previewFiles = [];
 
-    public MainWindow()
+    public MainWindow() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Compressr")) { }
+
+    internal MainWindow(string stateDirectory)
     {
+        this.stateDirectory = stateDirectory;
         InitializeComponent();
         Inputs.ItemsSource = videos;
         videos.CollectionChanged += (_, _) => QueueSummary.Text = videos.Count switch
@@ -41,7 +56,8 @@ public partial class MainWindow : Window
         };
         Standard.ItemsSource = Enum.GetValues<TelevisionSystem>();
         Capacity.ItemsSource = Enum.GetValues<DiscSize>();
-        Output.ItemsSource = new[] { "DVD-ready ISO (burn later)", "DVD folder" };
+        Output.ItemsSource = new[] { "Save DVD-ready ISO", "Save DVD folder", "Prepare and burn DVD" };
+        PreparedJobs.ItemsSource = preparedJobs;
         Standard.SelectedItem = TelevisionSystem.PAL;
         Capacity.SelectedItem = DiscSize.SingleLayer;
         Output.SelectedIndex = 0;
@@ -59,7 +75,9 @@ public partial class MainWindow : Window
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
         { Status.Text = $"Could not read saved TV standard: {ex.Message}"; }
         initialized = true;
-        LoadDrives();
+        LoadPreparedJobs();
+        UpdateOutput();
+        Loaded += async (_, _) => await RefreshReadinessAsync(true);
     }
 
     private MediaTools Tools()
@@ -83,34 +101,222 @@ public partial class MainWindow : Window
         Preview.Source = null;
         Estimate.Text = "TV standard changed. Check fit to refresh estimates.";
     }
-    private void RefreshDrives(object sender, RoutedEventArgs e) => LoadDrives();
-    private async void CheckDisc(object sender, RoutedEventArgs e)
+    private long RequiredBurnBytes() => DvdPlan.DiscCapacity((DiscSize)Capacity.SelectedItem) / 2048 * 2048;
+
+    private async void RefreshDrives(object sender, RoutedEventArgs e) => await RefreshReadinessAsync(true);
+    private async void CheckDisc(object sender, RoutedEventArgs e) => await RefreshReadinessAsync(false);
+    private async void DriveChanged(object sender, SelectionChangedEventArgs e)
+    { if (initialized && !updatingDrives) await RefreshReadinessAsync(false); }
+    private async void CapacityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!initialized) return;
+        Estimate.Text = "Capacity changed. Check fit before preparing.";
+        await RefreshReadinessAsync(false);
+    }
+    private async Task RefreshReadinessAsync(bool enumerate)
     {
         if (cancellation != null) return;
-        if (Drives.SelectedItem is not DvdDrive drive) { Status.Text = "Select a DVD writer first."; return; }
         cancellation = new(); Busy(true);
         try
         {
-            DvdMedia? media = null;
-            await RunStaAsync(() => media = DiscWriter.Inspect(drive));
+            Stage.Text = "Checking disc (read only)";
+            long required = RequiredBurnBytes();
+            DvdDrive? selected = Drives.SelectedItem as DvdDrive;
+            IReadOnlyList<DvdDrive> drives = [];
+            var results = new Dictionary<string, DiscReadiness>();
+            await RunStaAsync(() =>
+            {
+                drives = enumerate ? DiscWriter.GetDrives() : selected == null ? [] : [selected];
+                foreach (var drive in drives)
+                {
+                    try { results[drive.Id] = DiscReadiness.Assess(DiscWriter.Inspect(drive), required); }
+                    catch (Exception ex) { results[drive.Id] = DiscReadiness.Failed($"{drive.Label}: {ex.Message}"); }
+                }
+            });
             cancellation.Token.ThrowIfCancellationRequested();
-            media!.Check(2048);
+            if (enumerate)
+            {
+                updatingDrives = true;
+                try
+                {
+                    Drives.ItemsSource = drives;
+                    var previous = drives.FirstOrDefault(d => d.Id == selected?.Id);
+                    Drives.SelectedItem = !outputSelection.IsManual
+                        ? drives.FirstOrDefault(d => results[d.Id].Ready) ?? previous ?? drives.FirstOrDefault()
+                        : previous ?? drives.FirstOrDefault(d => results[d.Id].Ready) ?? drives.FirstOrDefault();
+                }
+                finally { updatingDrives = false; }
+            }
+            selected = Drives.SelectedItem as DvdDrive;
+            readiness = selected != null && results.TryGetValue(selected.Id, out var result) ? result : DiscReadiness.NoWriter;
+            DiscStatus.Text = readiness.Detail;
+            outputSelection.Apply(readiness);
+            UpdateOutput();
             Stage.Text = "Disc checked (not written)";
-            Status.Text = $"{drive.Label}\n{media.Summary}\n" +
-                "Supported for burning; select PAL for UK DVD-Video. Actual playback depends on the player's support for this recordable format.";
+            Status.Text = readiness.Detail;
+            var otherErrors = results.Where(r => r.Key != selected?.Id && r.Value.Detail.StartsWith("Disc detection failed:", StringComparison.Ordinal))
+                .Select(r => r.Value.Detail);
+            if (otherErrors.Any()) Status.Text += "\n" + string.Join("\n", otherErrors);
         }
         catch (OperationCanceledException) { Stage.Text = "Cancelled"; }
-        catch (Exception ex) { Stage.Text = "Disc check failed"; Status.Text = ex.Message; }
-        finally { cancellation.Dispose(); cancellation = null; Busy(false); }
+        catch (Exception ex)
+        {
+            readiness = DiscReadiness.Failed(ex.Message);
+            DiscStatus.Text = readiness.Detail;
+            outputSelection.Apply(readiness); UpdateOutput();
+            Stage.Text = "Disc check failed"; Status.Text = readiness.Detail;
+        }
+        finally { cancellation.Dispose(); cancellation = null; Progress.IsIndeterminate = false; Busy(false); }
     }
-    private void LoadDrives()
+    private void OutputChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!initialized || updatingOutput) return;
+        outputSelection.Choose(Output.SelectedIndex switch { 1 => OutputKind.Folder, 2 => OutputKind.Burn, _ => OutputKind.Iso });
+        UpdateOutput();
+    }
+    private void UseAutomaticOutput(object sender, RoutedEventArgs e)
+    {
+        outputSelection.UseAutomatic(readiness);
+        UpdateOutput();
+    }
+    private void UpdateOutput()
+    {
+        updatingOutput = true;
+        try { Output.SelectedIndex = outputSelection.Selected switch { OutputKind.Folder => 1, OutputKind.Burn => 2, _ => 0 }; }
+        finally { updatingOutput = false; }
+        SaveOptions.Visibility = outputSelection.Selected == OutputKind.Burn ? Visibility.Collapsed : Visibility.Visible;
+        SavePath.Text = outputSelection.Selected == OutputKind.Folder ? folderDestination : isoDestination;
+        OutputChoiceHint.Text = outputSelection.IsManual ? "Your choice is kept until you use automatic." :
+            "Automatic: burn if a suitable blank DVD is ready; otherwise save an ISO.";
+        UpdatePrimaryAction();
+    }
+    private void WorkspaceChanged(object sender, SelectionChangedEventArgs e)
+    { if (initialized && ReferenceEquals(e.Source, WorkspaceTabs)) UpdatePrimaryAction(); }
+    private void UpdatePrimaryAction() => StartButton.Content = WorkspaceTabs.SelectedIndex == 1 ? "_Burn selected DVD…" :
+        outputSelection.Selected == OutputKind.Burn ? "_Prepare and burn…" : "_Prepare DVD";
+    private bool SelectDestination()
+    {
+        if (outputSelection.Selected == OutputKind.Folder)
+        {
+            var dialog = new OpenFolderDialog { Title = "Choose a parent folder for a new DVD folder", InitialDirectory = Path.GetDirectoryName(folderDestination) };
+            if (dialog.ShowDialog(this) != true) return false;
+            folderDestination = Path.Combine(dialog.FolderName, $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}");
+        }
+        else
+        {
+            var dialog = new SaveFileDialog { Title = "Save DVD-ready ISO", Filter = "DVD image|*.iso", DefaultExt = ".iso",
+                AddExtension = true, FileName = Path.GetFileName(isoDestination), InitialDirectory = Path.GetDirectoryName(isoDestination), OverwritePrompt = true };
+            if (dialog.ShowDialog(this) != true) return false;
+            isoDestination = dialog.FileName;
+        }
+        UpdateOutput();
+        return true;
+    }
+    private void ChooseDestination(object sender, RoutedEventArgs e)
+    {
+        try { SelectDestination(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Win32Exception)
+        { Stage.Text = "Save location unavailable"; Status.Text = $"Could not select the DVD save location: {ex.Message}"; }
+    }
+    private void LoadPreparedJobs()
     {
         try
         {
-            Drives.ItemsSource = DiscWriter.GetDrives();
-            Drives.SelectedIndex = 0;
+            string path = Path.Combine(stateDirectory, "prepared-jobs.json");
+            if (!File.Exists(path)) return;
+            var paths = JsonSerializer.Deserialize<string[]>(File.ReadAllText(path)) ?? throw new InvalidDataException("Prepared DVD list is empty or invalid.");
+            foreach (string file in paths)
+            {
+                if (string.IsNullOrWhiteSpace(file) || !Path.IsPathFullyQualified(file))
+                    throw new InvalidDataException("Prepared DVD list contains an invalid path.");
+                if (!preparedJobs.Any(j => string.Equals(j.Path, file, StringComparison.OrdinalIgnoreCase)))
+                    preparedJobs.Add(new(file, "Not checked this run"));
+            }
         }
-        catch (Exception ex) { Status.Text = $"DVD drive detection failed: {ex.Message}. ISO/folder output is still available."; }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or ArgumentException)
+        { PreparedListNotice.Text = $"Could not load prepared DVD list: {ex.Message}"; }
+    }
+    private void SavePreparedJobs()
+    {
+        try
+        {
+            string path = Path.Combine(stateDirectory, "prepared-jobs.json");
+            string pending = path + ".tmp";
+            File.WriteAllText(pending, JsonSerializer.Serialize(preparedJobs.Select(j => j.Path)));
+            File.Move(pending, path, true);
+            PreparedListNotice.Text = "The list is saved between runs. Removing an entry never deletes its file.";
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { PreparedListNotice.Text = $"Could not save prepared DVD list: {ex.Message} Entries are available only in this run."; }
+    }
+    private PreparedJob AddPreparedJob(string path, string status)
+    {
+        path = Path.GetFullPath(path);
+        var existing = preparedJobs.FirstOrDefault(j => string.Equals(j.Path, path, StringComparison.OrdinalIgnoreCase));
+        var job = new PreparedJob(path, status);
+        if (existing == null) preparedJobs.Add(job);
+        else preparedJobs[preparedJobs.IndexOf(existing)] = job;
+        PreparedJobs.SelectedItem = job;
+        SavePreparedJobs();
+        return job;
+    }
+    private void SetPreparedStatus(string path, string status)
+    {
+        var existing = preparedJobs.FirstOrDefault(j => string.Equals(j.Path, path, StringComparison.OrdinalIgnoreCase));
+        if (existing == null) return;
+        bool selected = Equals(PreparedJobs.SelectedItem, existing);
+        var updated = existing with { Status = status };
+        preparedJobs[preparedJobs.IndexOf(existing)] = updated;
+        if (selected) PreparedJobs.SelectedItem = updated;
+    }
+    private void PreparedSelected(object sender, SelectionChangedEventArgs e)
+    {
+        if (PreparedPath == null) return;
+        var job = PreparedJobs.SelectedItem as PreparedJob;
+        PreparedPath.Text = job == null ? "Add saved ISO files, or prepare one above. Original videos are not needed." : $"{job.Path}\n{job.Status}";
+        BurnSelectedButton.IsEnabled = RemovePreparedButton.IsEnabled = job != null;
+    }
+    private void RemovePrepared(object sender, RoutedEventArgs e)
+    {
+        int index = PreparedJobs.SelectedIndex;
+        if (index < 0 || cancellation != null) return;
+        preparedJobs.RemoveAt(index);
+        PreparedJobs.SelectedIndex = Math.Min(index, preparedJobs.Count - 1);
+        SavePreparedJobs();
+        Status.Text = "Removed from the list only. The saved ISO has not been deleted.";
+    }
+    private async void AddPrepared(object sender, RoutedEventArgs e)
+    {
+        if (cancellation != null) return;
+        var dialog = new OpenFileDialog { Title = "Add prepared DVD ISOs (one file per disc)", Filter = "DVD-ready ISO|*.iso", Multiselect = true };
+        if (dialog.ShowDialog(this) != true) return;
+        await AddPreparedPathsAsync(dialog.FileNames);
+    }
+    private async Task AddPreparedPathsAsync(IEnumerable<string> paths)
+    {
+        if (cancellation != null) return;
+        cancellation = new(); Busy(true);
+        int valid = 0, invalid = 0;
+        try
+        {
+            foreach (string path in paths)
+            {
+                cancellation.Token.ThrowIfCancellationRequested();
+                AddPreparedJob(path, "Checking ISO…");
+                try
+                {
+                    using var dvd = await PreparedDvd.OpenAsync(path, Reporter(), cancellation.Token);
+                    SetPreparedStatus(path, $"Verified ISO · {dvd.Length / 1_000_000.0:F1} MB · not written");
+                    valid++;
+                }
+                catch (OperationCanceledException) { SetPreparedStatus(path, "Check cancelled; rechecked before burning"); throw; }
+                catch (Exception ex) { SetPreparedStatus(path, $"Invalid / unavailable: {ex.Message}"); invalid++; }
+            }
+            Stage.Text = "Prepared files checked";
+            Status.Text = $"{valid} valid ISO(s), {invalid} invalid or unavailable. Select one prepared DVD to burn to one blank disc. Files are never joined.";
+        }
+        catch (OperationCanceledException) { Stage.Text = "Cancelled"; Status.Text = "ISO checks cancelled. Nothing was written."; }
+        finally { cancellation.Dispose(); cancellation = null; Progress.IsIndeterminate = false; Busy(false); }
     }
     private void Browse(object sender, RoutedEventArgs e)
     {
@@ -265,27 +471,39 @@ public partial class MainWindow : Window
     }
     private async void Start(object sender, RoutedEventArgs e)
     {
+        if (WorkspaceTabs.SelectedIndex == 1) { BurnPrepared(sender, e); return; }
         if (cancellation != null || !AddPending()) return;
+        OutputKind output = outputSelection.Selected;
+        DvdDrive? drive = Drives.SelectedItem as DvdDrive;
         string destination;
-        if (Output.SelectedIndex == 1)
+        long? originalLength;
+        DateTime? originalModified;
+        try
         {
-            var dialog = new OpenFolderDialog { Title = "Choose an output parent folder; a new Compressr DVD folder will be created" };
-            if (dialog.ShowDialog(this) != true) return;
-            destination = Path.Combine(dialog.FolderName, $"Compressr-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}");
+            if (output == OutputKind.Iso && File.Exists(isoDestination) && !SelectDestination()) return;
+            destination = output == OutputKind.Folder ? folderDestination : isoDestination;
+            var existing = output == OutputKind.Iso && File.Exists(destination) ? new FileInfo(destination) : null;
+            originalLength = existing?.Length;
+            originalModified = existing?.LastWriteTimeUtc;
         }
-        else
-        {
-            var dialog = new SaveFileDialog { Filter = "DVD image|*.iso", FileName = "Compressr.iso", OverwritePrompt = true };
-            if (dialog.ShowDialog(this) != true) return;
-            destination = dialog.FileName;
-        }
-        int output = Output.SelectedIndex;
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Win32Exception)
+        { Stage.Text = "Save location unavailable"; Status.Text = $"Could not use the DVD save location: {ex.Message}"; return; }
         cancellation = new(); Busy(true);
         string work = Path.Combine(stateDirectory, "jobs", Guid.NewGuid().ToString("N"));
+        if (output == OutputKind.Burn) destination = Path.Combine(work, "prepared.iso");
         string? partialIso = null;
         try
         {
             var token = cancellation.Token; var reporter = Reporter(); var tools = Tools();
+            if (output == OutputKind.Burn)
+            {
+                if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer and refresh, or explicitly choose Save DVD-ready ISO.");
+                long requiredBytes = RequiredBurnBytes();
+                await RunStaAsync(() => DiscWriter.CheckBlank(drive, requiredBytes));
+                token.ThrowIfCancellationRequested();
+            }
+            if (output == OutputKind.Folder && Directory.Exists(destination))
+                throw new IOException("The DVD output folder already exists. Change the save location to create a new DVD folder.");
             var estimate = await EstimateAsync(tools, token);
             _ = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
             var clips = new List<VideoClip>();
@@ -299,7 +517,7 @@ public partial class MainWindow : Window
             Estimate.Text = VideoPlaylist.FitEstimate(info, (TelevisionSystem)Standard.SelectedItem);
             var plan = DvdPlan.Create(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
             var dvd = await new DvdPipeline(tools).AuthorPlaylistAsync(clips, plan, work, reporter, token);
-            if (output == 1)
+            if (output == OutputKind.Folder)
             {
                 token.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(destination);
@@ -322,15 +540,39 @@ public partial class MainWindow : Window
                 using (var prepared = await PreparedDvd.OpenAsync(partialIso, reporter, token))
                     await prepared.VerifyDirectoryAsync(Path.Combine(dvd, "VIDEO_TS"), reporter, token);
                 token.ThrowIfCancellationRequested();
-                File.Move(partialIso, destination, true); partialIso = null;
+                if (originalLength != null)
+                {
+                    var current = new FileInfo(destination);
+                    if (!current.Exists || current.Length != originalLength || current.LastWriteTimeUtc != originalModified)
+                        throw new IOException("The destination ISO changed during preparation. It was not overwritten. Choose another filename and prepare again.");
+                }
+                File.Move(partialIso, destination, originalLength != null); partialIso = null;
+                AddPreparedJob(destination, "Verified ISO · not written");
+                if (output == OutputKind.Burn)
+                {
+                    await BurnIsoAsync(destination, drive, token);
+                    return;
+                }
             }
             Stage.Text = "Done"; Progress.IsIndeterminate = false; Progress.Value = 100;
-            Status.Text = $"Saved to {destination}\n" + (output == 0
-                ? "DVD-ready ISO verified. Keep this file; reopen it with Burn prepared DVD whenever you have a blank disc. Original videos and work folders are not needed."
+            Status.Text = $"Saved to {destination}\n" + (output == OutputKind.Iso
+                ? "DVD-ready ISO verified and added to Burn prepared DVDs. Keep this file; select it in that tab whenever you have a blank disc. Original videos and work folders are not needed."
                 : "DVD folder saved. Choose ISO output for the prepare-now / burn-later workflow.");
         }
-        catch (OperationCanceledException) { Stage.Text = "Cancelled"; Status.Text = $"No disc was written. Work files retained at {work}." + (output == 1 ? $"\nAny partially saved folder at {destination} is not a complete DVD." : ""); }
-        catch (Exception ex) { Stage.Text = "Could not prepare DVD"; Status.Text = $"{ex.Message}\nWork files retained at {work}." + (output == 1 ? $"\nAny partially saved folder at {destination} is not a complete DVD." : ""); }
+        catch (OperationCanceledException)
+        {
+            Stage.Text = "Cancelled";
+            Status.Text = $"No disc was written. Work files retained at {work}. Output choice unchanged." +
+                (output == OutputKind.Folder ? $"\nAny partially saved folder at {destination} is not a complete DVD." : "");
+            SetPreparedStatus(destination, "Cancelled · not written");
+        }
+        catch (Exception ex)
+        {
+            Stage.Text = burning ? "Disc not verified" : "Could not complete DVD";
+            Status.Text = $"{ex.Message}\nWork files retained at {work}. Output choice unchanged; no automatic file fallback." +
+                (output == OutputKind.Folder ? $"\nAny partially saved folder at {destination} is not a complete DVD." : "");
+            SetPreparedStatus(destination, burning ? "Write / verification failed; disc not verified" : $"Not written: {ex.Message}");
+        }
         finally
         {
             if (partialIso != null && File.Exists(partialIso) && !burning)
@@ -344,36 +586,45 @@ public partial class MainWindow : Window
     private async void BurnPrepared(object sender, RoutedEventArgs e)
     {
         if (cancellation != null) return;
-        var dialog = new OpenFileDialog { Title = "Open a prepared Compressr DVD ISO", Filter = "DVD-ready ISO|*.iso" };
-        if (dialog.ShowDialog(this) != true) return;
+        if (PreparedJobs.SelectedItem is not PreparedJob job) { Status.Text = "Select one prepared ISO first."; return; }
         cancellation = new(); Busy(true);
         try
         {
-            var reporter = Reporter();
-            using var prepared = await PreparedDvd.OpenAsync(dialog.FileName, reporter, cancellation.Token);
-            cancellation.Token.ThrowIfCancellationRequested();
-            var drive = Drives.SelectedItem as DvdDrive;
-            if (drive == null)
-            {
-                Stage.Text = "Ready to burn"; Progress.Value = 100;
-                Status.Text = $"Validated {prepared.Path} ({prepared.Length / 1_000_000.0:F1} MB).\nNo DVD writer selected. Connect a writer, refresh drives, insert a blank DVD, then open this ISO again. No source files are needed.";
-                return;
-            }
-            await RunStaAsync(() => DiscWriter.CheckBlank(drive, prepared.Length));
-            cancellation.Token.ThrowIfCancellationRequested();
-            if (MessageBox.Show(this, $"Write and finalise {Path.GetFileName(prepared.Path)} to {drive.Label}?\nThis cannot be undone. Compressr never erases discs.",
-                "Confirm DVD burning", MessageBoxButton.YesNo, MessageBoxImage.Warning) != MessageBoxResult.Yes)
-            { Stage.Text = "Not written"; Status.Text = "Burn declined. The prepared ISO is unchanged."; return; }
-            burning = true; CancelButton.IsEnabled = false;
-            // IMAPI COM calls run on their own STA, never on WPF's UI thread.
-            await RunStaAsync(() => DiscWriter.Burn(prepared, drive, reporter));
-            await DiscWriter.VerifyAsync(prepared, drive, reporter);
-            Stage.Text = "Done"; Progress.Value = 100;
-            Status.Text = "DVD burned, finalised and VIDEO_TS files verified against the saved ISO by SHA-256 read-back.";
+            await BurnIsoAsync(job.Path, Drives.SelectedItem as DvdDrive, cancellation.Token);
         }
-        catch (OperationCanceledException) { Stage.Text = "Cancelled"; Status.Text = "No disc was written. The prepared ISO is unchanged."; }
-        catch (Exception ex) { Stage.Text = burning ? "Disc not verified" : "Could not burn prepared DVD"; Status.Text = ex.Message; }
+        catch (OperationCanceledException) { Stage.Text = "Cancelled"; Status.Text = "No disc was written. The prepared ISO is unchanged."; SetPreparedStatus(job.Path, "Cancelled · not written"); }
+        catch (Exception ex)
+        {
+            Stage.Text = burning ? "Disc not verified" : "Could not burn prepared DVD"; Status.Text = ex.Message;
+            SetPreparedStatus(job.Path, burning ? $"Disc not verified: {ex.Message}" : $"Not written: {ex.Message}");
+        }
         finally { burning = false; cancellation.Dispose(); cancellation = null; Progress.IsIndeterminate = false; Busy(false); }
+    }
+    private async Task BurnIsoAsync(string path, DvdDrive? drive, CancellationToken token)
+    {
+        var reporter = Reporter();
+        SetPreparedStatus(path, "Checking ISO and disc…");
+        using var prepared = await PreparedDvd.OpenAsync(path, reporter, token);
+        token.ThrowIfCancellationRequested();
+        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, refresh, then select this ISO again. The saved ISO is unchanged.");
+        await RunStaAsync(() => DiscWriter.CheckBlank(drive, prepared.Length));
+        token.ThrowIfCancellationRequested();
+        if (MessageBox.Show(this, $"Write and finalise {Path.GetFileName(prepared.Path)} ({prepared.Length / 1_000_000.0:F1} MB) to {drive.Label}?\nOne ISO will be written to one disc. This cannot be undone. Compressr never erases discs.",
+            "Confirm DVD burning", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+        {
+            Stage.Text = "Not written"; Status.Text = $"Burn declined. The prepared ISO is unchanged at {path}. Output choice unchanged.";
+            SetPreparedStatus(path, "Burn declined · not written"); return;
+        }
+        token.ThrowIfCancellationRequested();
+        burning = true; CancelButton.IsEnabled = false;
+        SetPreparedStatus(path, "Writing / verifying · cannot cancel");
+        await RunStaAsync(() => DiscWriter.Burn(prepared, drive, reporter));
+        await DiscWriter.VerifyAsync(prepared, drive, reporter);
+        Stage.Text = "Done"; Progress.Value = 100;
+        Status.Text = "One DVD burned, finalised and verified by SHA-256 read-back. Insert a new blank disc, then select another prepared ISO to repeat.";
+        SetPreparedStatus(path, "Burned and verified this run");
+        readiness = new(false, "Disc has been written. Insert a new blank DVD and check disc before the next job.");
+        DiscStatus.Text = readiness.Detail;
     }
     private static Task RunStaAsync(Action action)
     {
