@@ -56,6 +56,7 @@
         <TextBlock Text="Open the saved ISO, even in a new app run. No original videos needed." TextWrapping="Wrap" Margin="0,4"/>
         <DockPanel>
           <Button Content="Refresh drives" Click="RefreshDrives" DockPanel.Dock="Right"/>
+          <Button Content="Check disc" Click="CheckDisc" DockPanel.Dock="Right"/>
           <ComboBox x:Name="Drives" DisplayMemberPath="Label" AutomationProperties.Name="DVD writer"/>
         </DockPanel>
         <Button Content="Burn prepared DVD…" Click="BurnPrepared"/>

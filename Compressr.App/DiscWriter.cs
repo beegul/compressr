@@ -43,6 +43,9 @@ public static class DiscWriter
     }
 
     public static void CheckBlank(DvdDrive drive, long requiredBytes)
+        => Inspect(drive).Check(requiredBytes);
+
+    public static DvdMedia Inspect(DvdDrive drive)
     {
         object? recorderObject = null, formatObject = null;
         try
@@ -50,15 +53,12 @@ public static class DiscWriter
             dynamic recorder = recorderObject = Com("IMAPI2.MsftDiscRecorder2");
             recorder.InitializeDiscRecorder(drive.Id);
             dynamic format = formatObject = Com("IMAPI2.MsftDiscFormat2Data");
-            if (!(bool)format.IsRecorderSupported(recorder) || !(bool)format.IsCurrentMediaSupported(recorder))
-                throw new InvalidOperationException("Insert a supported writable DVD in the selected drive.");
             format.Recorder = recorder;
-            int type = (int)format.CurrentPhysicalMediaType;
-            if (type is not (5 or 6 or 7 or 8 or 9 or 10 or 11 or 13))
-                throw new InvalidOperationException("The inserted medium is not a supported DVD.");
-            if (!(bool)format.MediaHeuristicallyBlank && !(bool)format.MediaPhysicallyBlank)
-                throw new InvalidOperationException("The DVD is not blank. Compressr never erases or overwrites discs.");
-            PreparedDvd.CheckCapacity(requiredBytes, (long)format.FreeSectorsOnMedia * 2048);
+            bool supported = (bool)format.IsRecorderSupported(recorder) && (bool)format.IsCurrentMediaSupported(recorder);
+            if (!supported) throw new InvalidOperationException("Insert a supported writable DVD in the selected drive.");
+            return new((int)format.CurrentPhysicalMediaType, true, true,
+                (bool)format.MediaPhysicallyBlank, (bool)format.MediaHeuristicallyBlank,
+                (long)format.TotalSectorsOnMedia, (long)format.FreeSectorsOnMedia);
         }
         finally { Release(formatObject); Release(recorderObject); }
     }

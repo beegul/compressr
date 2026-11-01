@@ -78,6 +78,25 @@ public partial class MainWindow : Window
         Estimate.Text = "TV standard changed. Check fit to refresh estimates.";
     }
     private void RefreshDrives(object sender, RoutedEventArgs e) => LoadDrives();
+    private async void CheckDisc(object sender, RoutedEventArgs e)
+    {
+        if (cancellation != null) return;
+        if (Drives.SelectedItem is not DvdDrive drive) { Status.Text = "Select a DVD writer first."; return; }
+        cancellation = new(); Busy(true);
+        try
+        {
+            DvdMedia? media = null;
+            await RunStaAsync(() => media = DiscWriter.Inspect(drive));
+            cancellation.Token.ThrowIfCancellationRequested();
+            media!.Check(2048);
+            Stage.Text = "Disc checked (not written)";
+            Status.Text = $"{drive.Label}\n{media.Summary}\n" +
+                "Supported for burning; select PAL for UK DVD-Video. Actual playback depends on the player's support for this recordable format.";
+        }
+        catch (OperationCanceledException) { Stage.Text = "Cancelled"; }
+        catch (Exception ex) { Stage.Text = "Disc check failed"; Status.Text = ex.Message; }
+        finally { cancellation.Dispose(); cancellation = null; Busy(false); }
+    }
     private void LoadDrives()
     {
         try

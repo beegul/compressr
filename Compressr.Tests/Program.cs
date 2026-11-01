@@ -77,6 +77,23 @@ Throws<InvalidOperationException>(() => PreparedDvd.CheckCapacity(singleCapacity
 Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(2049, singleCapacity), "partial image sector");
 Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(0, singleCapacity), "empty image");
 Throws<InvalidDataException>(() => PreparedDvd.CheckCapacity(DvdPlan.DiscCapacity(DiscSize.DualLayer) + 2048, long.MaxValue), "oversized image");
+var attached = new DvdMedia(7, true, true, true, true, 2295104, 2295104);
+Check(attached.Name == "DVD+RW" && attached.AvailableBytes == 4_700_372_992, "attached DVD+RW exact format/capacity");
+attached.Check(singleCapacity);
+Check(true, "single-layer image supported on attached media snapshot");
+Throws<InvalidOperationException>(() => attached.Check(DvdPlan.DiscCapacity(DiscSize.DualLayer) / 2048 * 2048), "dual-layer image rejected on actual single-layer disc");
+foreach (int type in new[] { 6, 7, 8, 9, 10, 11, 13 })
+{
+    (attached with { Type = type }).Check(2048);
+    Check(true, "recordable DVD type supported " + type);
+}
+foreach (int type in new[] { 0, 1, 2, 3, 4, 5, 12, 14, 18, 19 })
+    Throws<InvalidOperationException>(() => (attached with { Type = type }).Check(2048), "non-player DVD or non-DVD rejected " + type);
+Throws<InvalidOperationException>(() => (attached with { PhysicallyBlank = false, HeuristicallyBlank = false }).Check(2048), "nonblank RW never erased");
+Throws<InvalidOperationException>(() => (attached with { RecorderSupported = false }).Check(2048), "unsupported recorder");
+Throws<InvalidOperationException>(() => (attached with { MediaSupported = false }).Check(2048), "unsupported current medium");
+Throws<InvalidOperationException>(() => (attached with { FreeSectors = -1 }).Check(2048), "invalid free sectors");
+Throws<InvalidOperationException>(() => (attached with { FreeSectors = attached.TotalSectors + 1 }).Check(2048), "inconsistent capacity");
 
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
@@ -110,6 +127,12 @@ foreach (var test in new[]
     string iso = Path.Combine(root, test.Name + ".iso");
     await tools.CreateIsoAsync(dvd, iso, plan, progress, token);
     string vob = Path.Combine(dvd, "VIDEO_TS", "VTS_01_1.VOB");
+    byte[] navigationBytes = File.ReadAllBytes(Path.Combine(dvd, "VIDEO_TS", "VIDEO_TS.IFO"));
+    Check(navigationBytes[35] == 0, test.Name + " no DVD region restrictions");
+    int firstPlay = checked((int)System.Buffers.Binary.BinaryPrimitives.ReadUInt32BigEndian(navigationBytes.AsSpan(132, 4)));
+    int commands = firstPlay + System.Buffers.Binary.BinaryPrimitives.ReadUInt16BigEndian(navigationBytes.AsSpan(firstPlay + 228, 2));
+    Check(navigationBytes.AsSpan(commands + 8, 8).SequenceEqual(new byte[] { 0x30, 0x02, 0, 0, 0, 1, 0, 0 }),
+        test.Name + " authored first-play command jumps to title 1");
     string result = await tools.RunAsync(tools.Ffprobe, ["-v", "error", "-show_streams", "-of", "json", vob], token);
     File.WriteAllText(Path.Combine(work, "ffprobe.json"), result);
     using var parsed = JsonDocument.Parse(result);

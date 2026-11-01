@@ -12,7 +12,7 @@ cover landscape, silent rotated portrait, PAL/NTSC, manual rotation and overlong
 input and half-D1 encoding, plus ordered stitching with mixed formats and audio.
 Eight authored ISOs have been mounted and their VIDEO_TS hashes matched.
 Saved ISOs also reopen and verify independently of original source/job folders.
-The focused/integration run passed 133 assertions, including image rejection,
+The focused/integration run passed 168 assertions, including image rejection,
 capacity boundaries, image locking and read-back corruption.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. Physical burning has **not** been performed.
@@ -77,7 +77,9 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    and verifies its DVD files against the authored output before saving it.
    DVD folder output is still available, but the burn-later action takes an ISO.
 5. Later, start the app with `.\scripts\Run.ps1`, insert a compatible blank DVD,
-   select the writer (use **Refresh drives** after connecting one), and click
+   select the writer (use **Refresh drives** after connecting one). **Check disc**
+   reports the current format, blank state and exact available bytes without
+   writing, erasing or ejecting it. Then click
    **Burn prepared DVD…** to open the saved ISO. Confirm the named image and drive.
    No input videos need to be added, and PAL/capacity controls do not alter a
    prepared image. There is no download, conversion or authoring during this action.
@@ -117,6 +119,13 @@ burning; writing/finalising and read-back must finish before the app closes.
 - Actual authored and image sizes are checked too; real blank-media capacity is
   checked before writing and again immediately before IMAPI writes. Not every burner supports
   every DVD type; dual-layer requires compatible media and hardware.
+- For UK players, prepare **PAL** DVD-Video. Autoplay navigation starts title 1
+  and generated DVD navigation has no region restrictions. Recordable-format
+  support is separate: older players may accept DVD-R/+R but not DVD-RW/+RW.
+  DVD+R book-type/bitsetting is drive-dependent and is not changed by Compressr.
+  DVD-RAM is rejected for ordinary-player output; it is not widely supported
+  by set-top players. Dual-layer needs a compatible writer and player; layer-break
+  positioning is left to IMAPI and has not been hardware-tested.
 - `dvdauthor` produces uppercase VIDEO_TS navigation and a first-play command
   that starts the single title without a menu. `mkisofs -dvd-video -udf` supplies
   DVD file ordering/padding and a DVD-Video UDF 1.02 / ISO9660 image, rather than
@@ -171,6 +180,10 @@ are unavailable, comparing against independent read-back copies. They reject
 damaged ISO/UDF/navigation/program-stream headers, mismatched backups, truncation
 and unsupported video attributes; test exact media boundaries, cancellation,
 image write-locking and corrupted read-back files. None call IMAPI's write operation.
+Media checks cover supported recordable types, nonblank rewritable rejection,
+invalid capacities and the actual attached DVD+RW's single-layer boundary.
+Authored IFO tests check a zero region-prohibition mask and the actual first-play
+command bytes jumping to title 1, rather than relying only on the author XML.
 The PowerShell harness mounts each generated ISO and checks navigation files and
 all VIDEO_TS hashes against the authored tree. It never writes or erases a
 physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
@@ -201,3 +214,18 @@ Dual-layer provides appreciably more quality headroom for concert motion/detail.
 **This exact concert remains untested end-to-end.** These are metadata-based fit estimates, not an assessment of this concert's
 visual quality or proof of a burned disc. Availability/metadata may change.
 Only generated clips and permitted media are used for the actual pipeline tests.
+
+## Attached disc check (1 November 2026)
+
+Read-only IMAPI inspection detected **HL-DT-ST DVDRAM GT50N**, firmware **LC01**,
+on `D:\`, with a **blank DVD+RW** (type 7). Both blank checks were true:
+2,295,104 total/free sectors, **4,700,372,992 bytes** available. IMAPI supports
+the recorder and inserted medium. The app's real no-write capacity check accepts
+the generated PAL sample ISO and rejects a dual-layer-sized image on this disc.
+Use **SingleLayer** when preparing for these discs: the 2:54:32 concert metadata
+still budgets **3.063 Mbps** video. A dual-layer preparation at 5.748 Mbps would
+not fit this single-layer disc.
+
+Nothing was burned, erased, formatted or ejected. This confirms software/device
+preflight compatibility, not a successful physical burn or playback on a UK
+set-top player. The concert was not downloaded or tested end-to-end.
