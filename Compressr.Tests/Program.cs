@@ -157,6 +157,7 @@ Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
 await DiscPreparationTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
 await ReliabilityTests.RunProcessAsync(Check);
+await SourceVideoTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} focused assertions including tool process cleanup");
 
 if (!args.Contains("--integration")) return;

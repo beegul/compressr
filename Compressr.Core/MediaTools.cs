@@ -132,7 +132,10 @@ public sealed class MediaTools
         double duration = doc.RootElement.GetProperty("duration").GetDouble();
         if (!double.IsFinite(duration) || duration <= 0)
             throw new InvalidOperationException("YouTube did not provide a finite duration; live streams are not supported.");
-        return new(doc.RootElement.GetProperty("title").GetString() ?? "YouTube video", duration);
+        string? title = doc.RootElement.GetProperty("title").GetString();
+        if (string.IsNullOrWhiteSpace(title))
+            throw new InvalidOperationException("YouTube did not provide a video title.");
+        return new(title, duration);
     }
 
     public async Task<string> DownloadAsync(string url, string directory, IProgress<StageProgress> progress, CancellationToken token)

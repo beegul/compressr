@@ -53,6 +53,13 @@ list** never deletes an ISO. Source videos above are concatenated into one DVD;
 prepared ISOs are distinct disc jobs, never concatenated or written as multisession
 data, and the list is not an automatic multi-disc/bulk conversion scheduler.
 Preparation and status remain visible while the content scrolls on smaller screens.
+YouTube links look up their video titles automatically, using metadata only (no
+video download). Titles replace URLs in **Play order** as they arrive; hover a row
+to see its original link. Move up/down always controls playback order: titles
+never sort the list. Pending lookups, failures and cancellation appear in the row.
+**Retry title** (or **Check fit**) retries an unavailable title; **Cancel**, removing
+a row, or closing the app stops pending lookups. Successful title/duration results
+are reused by Check fit. Local files keep their filenames.
 The interface uses the native Segoe UI family, a restrained teal accent, readable
 sentence-case labels and keyboard focus indicators, following
 [Windows typography guidance](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography)

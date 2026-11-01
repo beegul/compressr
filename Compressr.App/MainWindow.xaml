@@ -39,7 +39,14 @@
               <ListBox x:Name="Inputs" Height="124" BorderBrush="#B6C5CE" SelectionChanged="InputSelected"
                        AutomationProperties.Name="Ordered videos" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                 <ListBox.ItemTemplate>
-                  <DataTemplate><TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" ToolTip="{Binding Input}"/></DataTemplate>
+                  <DataTemplate>
+                    <StackPanel ToolTip="{Binding Detail}">
+                      <TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding TitleStatus}" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding TitleStatus}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                      </TextBlock>
+                    </StackPanel>
+                  </DataTemplate>
                 </ListBox.ItemTemplate>
               </ListBox>
               <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
@@ -60,6 +67,7 @@
                 </Style>
               </WrapPanel.Resources>
               <Button Content="Move up" Click="MoveUp"/><Button Content="Move down" Click="MoveDown"/><Button Content="Remove" Click="RemoveInput"/>
+              <Button x:Name="RetryTitleButton" Content="Retry title" Click="RetryTitle" IsEnabled="{Binding ElementName=Inputs, Path=SelectedItem.CanRetryTitle, FallbackValue=False, TargetNullValue=False}" ToolTip="Retry an unavailable YouTube title without downloading the video."/>
             </WrapPanel>
             <TextBlock Text="Whole videos are joined. YouTube playback timestamps are ignored." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
             <Grid Margin="0,20,0,0">

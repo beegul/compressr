@@ -5,7 +5,7 @@ if ($PSVersionTable.PSEdition -ne 'Core' -or [Threading.Thread]::CurrentThread.A
 }
 $root = Split-Path $PSScriptRoot -Parent
 $previousTools = $env:COMPRESSR_TOOLS
-if ($SourceVideoPaths -and !$env:COMPRESSR_TOOLS) { $env:COMPRESSR_TOOLS = Join-Path $root 'tools' }
+if (!$env:COMPRESSR_TOOLS) { $env:COMPRESSR_TOOLS = Join-Path $root 'tools' }
 Add-Type -AssemblyName PresentationFramework
 Add-Type -Path (Join-Path $root 'Compressr.Core\bin\Release\net8.0\Compressr.Core.dll')
 Add-Type -Path (Join-Path $root 'Compressr.App\bin\Release\net8.0-windows\Compressr.dll')
@@ -14,9 +14,16 @@ $app.InitializeComponent()
 [Threading.SynchronizationContext]::SetSynchronizationContext(
     [Windows.Threading.DispatcherSynchronizationContext]::new([Windows.Threading.Dispatcher]::CurrentDispatcher))
 $testState = Join-Path $root ("artifacts\interface-state-" + [Guid]::NewGuid().ToString('N'))
+$titleRequests = [Collections.Generic.Dictionary[string, Threading.Tasks.TaskCompletionSource[Compressr.Core.YouTubeInfo]]]::new()
+$titleLookup = [Func[string, Threading.CancellationToken, Threading.Tasks.Task[Compressr.Core.YouTubeInfo]]]{
+    param($url, $token)
+    $pending = [Threading.Tasks.TaskCompletionSource[Compressr.Core.YouTubeInfo]]::new()
+    $titleRequests[$url] = $pending
+    return $pending.Task.WaitAsync($token)
+}
 $constructor = [Compressr.App.MainWindow].GetConstructor([Reflection.BindingFlags]'Instance,NonPublic',
-    $null, [Type[]]@([string]), $null)
-$window = $constructor.Invoke([object[]]@([string]$testState))
+    $null, [Type[]]@([string], $titleLookup.GetType()), $null)
+$window = $constructor.Invoke([object[]]@([string]$testState, $titleLookup))
 $ui = @{}
 $script:checks = 0
 function Check([bool]$condition, [string]$message) {
@@ -73,7 +80,7 @@ try {
     foreach ($name in @('Source', 'Inputs', 'Estimate', 'Preview', 'RotationLabel', 'Standard', 'Capacity',
         'Output', 'Drives', 'Options', 'BurnOptions', 'StartButton', 'CancelButton', 'Stage', 'Progress', 'Status',
         'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
-        'BurnSelectedButton', 'RemovePreparedButton', 'PrepareDiscButton', 'SourcePrepareDiscButton')) {
+        'BurnSelectedButton', 'RemovePreparedButton', 'PrepareDiscButton', 'SourcePrepareDiscButton', 'RetryTitleButton')) {
         Check ($null -ne $window.FindName($name)) "Retained $name"
         $ui[$name] = $window.FindName($name)
     }
@@ -128,10 +135,54 @@ try {
     Check ($ui.Inputs.Items.Count -eq 1 -and $ui.QueueSummary.Text.StartsWith('1 video')) 'Single-video summary'
     Invoke-Handler 'AddVideo' @('https://youtu.be/second')
     Check ($ui.Inputs.Items.Count -eq 2 -and $ui.QueueSummary.Text.StartsWith('2 videos')) 'Multiple-video summary'
+    $firstVideo = $ui.Inputs.Items[0]
+    $secondVideo = $ui.Inputs.Items[1]
+    $firstVideo.Rotation = 90
+    Check ($firstVideo.IsResolvingTitle -and $ui.Options.IsEnabled -and $ui.CancelButton.IsEnabled -and !$ui.RetryTitleButton.IsEnabled) 'Metadata lookup is cancellable without locking source order controls or permitting duplicate retries'
     Invoke-Handler 'MoveUp' @($null, [Windows.RoutedEventArgs]::new())
-    Check ($ui.Inputs.Items[0].ToString() -eq 'https://youtu.be/second') 'Move up preserves playback order'
+    Check ($ui.Inputs.Items[0].Input -eq 'https://youtu.be/second') 'Move up preserves playback order'
+    $titleRequests[$secondVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('Second video - chapter two', 120))
+    $titleRequests[$firstVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('First video - chapter one', 60))
+    Await-Task ($firstVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
+    Await-Task ($secondVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
+    Layout 1008 921
+    Check ($ui.Inputs.Items[0].Label -eq 'Second video - chapter two' -and
+        $ui.Inputs.Items[1].Label -eq 'First video - chapter one') 'Resolved titles follow moved rows without sorting by title or completion'
+    Check ($firstVideo.Rotation -eq 90 -and $ui.Inputs.SelectedItem -eq $secondVideo) 'Title completion preserves manual rotation and selection'
+    $presenter = [Windows.Controls.ContentPresenter]::new()
+    $presenter.Content = $secondVideo
+    $presenter.ContentTemplate = $ui.Inputs.ItemTemplate
+    $presenter.Measure([Windows.Size]::new(500, 60)); $presenter.Arrange([Windows.Rect]::new(0, 0, 500, 60))
+    $panel = [Windows.Media.VisualTreeHelper]::GetChild($presenter, 0)
+    Check ($panel.Children[0].Text -eq $secondVideo.Label -and $panel.ToolTip -eq $secondVideo.Input) 'Actual queue template binds title and retains original URL tooltip'
+    Screenshot 'interface-youtube-titles.png'
+    $requestCount = $titleRequests.Count
+    Invoke-Handler 'CheckFit' @($null, [Windows.RoutedEventArgs]::new())
+    Await-Idle
+    Check ($ui.Stage.Text -eq 'Fit checked' -and $titleRequests.Count -eq $requestCount) "Native Check fit reuses resolved metadata without requesting again: $($ui.Status.Text)"
     Invoke-Handler 'MoveDown' @($null, [Windows.RoutedEventArgs]::new())
-    Check ($ui.Inputs.Items[1].ToString() -eq 'https://youtu.be/second') 'Move down preserves playback order'
+    Check ($ui.Inputs.Items[1].Input -eq 'https://youtu.be/second') 'Move down preserves playback order'
+    Invoke-Handler 'AddVideo' @('https://youtu.be/failure')
+    $failedVideo = $ui.Inputs.SelectedItem
+    $titleRequests[$failedVideo.Input].SetException([IO.IOException]::new('Fixture offline'))
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($failedVideo.TitleStatus.Contains('Fixture offline') -and $failedVideo.Label -eq $failedVideo.Input -and $ui.RetryTitleButton.IsEnabled) 'Native row reports lookup failure, keeps the URL and enables retry'
+    Invoke-Handler 'RetryTitle' @($null, [Windows.RoutedEventArgs]::new())
+    $titleRequests[$failedVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('Recovered video title', 30))
+    Await-Task ($failedVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
+    Check ($failedVideo.Label -eq 'Recovered video title') 'Retry title updates the existing native queue row'
+    Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+    Invoke-Handler 'AddVideo' @('https://youtu.be/cancel')
+    $cancelVideo = $ui.Inputs.SelectedItem
+    Invoke-Handler 'Cancel' @($null, [Windows.RoutedEventArgs]::new())
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($cancelVideo.TitleStatus.Contains('cancelled') -and $cancelVideo.Metadata -eq $null) 'Cancel stops background title lookup explicitly'
+    Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+    Invoke-Handler 'AddVideo' @('https://youtu.be/remove')
+    $removedVideo = $ui.Inputs.SelectedItem
+    Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check (!$removedVideo.IsResolvingTitle -and $removedVideo.Metadata -eq $null) 'Removing a pending row cancels its request without affecting the other rows'
     Invoke-Handler 'Busy' @($true)
     Check (!$ui.Options.IsEnabled -and !$ui.BurnOptions.IsEnabled -and !$ui.StartButton.IsEnabled -and $ui.CancelButton.IsEnabled) 'Preparing locks options, allows cancellation'
     Invoke-Handler 'Busy' @($false)
@@ -189,7 +240,7 @@ try {
         $ui.WorkspaceTabs.SelectedIndex = 1
         Layout 1008 921
         Screenshot 'interface-prepared-job.png'
-        $restored = $constructor.Invoke([object[]]@([string]$testState))
+        $restored = $constructor.Invoke([object[]]@([string]$testState, $titleLookup))
         try {
             $restoredJobs = $restored.FindName('PreparedJobs')
             Check ($restoredJobs.Items.Count -eq $ui.PreparedJobs.Items.Count) 'Prepared list reloads across app windows'

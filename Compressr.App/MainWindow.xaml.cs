@@ -32,22 +32,19 @@ public partial class MainWindow : Window
     }
     private readonly ObservableCollection<PreparedJob> preparedJobs = [];
     private int rotation;
-    private sealed class InputVideo(string input)
-    {
-        public string Input { get; } = input;
-        public int Rotation { get; set; }
-        public string? CachedSource { get; set; }
-        public string Label => File.Exists(Input) ? Path.GetFileName(Input) : Input;
-        public override string ToString() => Label;
-    }
-    private readonly ObservableCollection<InputVideo> videos = [];
+    private readonly ObservableCollection<SourceVideo> videos = [];
+    private readonly SemaphoreSlim titleSlots = new(2);
+    private readonly Func<string, CancellationToken, Task<YouTubeInfo>> metadataLookup;
     private readonly List<string> previewFiles = [];
 
     public MainWindow() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Compressr")) { }
 
-    internal MainWindow(string stateDirectory)
+    internal MainWindow(string stateDirectory) : this(stateDirectory, null) { }
+
+    internal MainWindow(string stateDirectory, Func<string, CancellationToken, Task<YouTubeInfo>>? metadataLookup)
     {
         this.stateDirectory = stateDirectory;
+        this.metadataLookup = metadataLookup ?? LookupMetadataAsync;
         InitializeComponent();
         Inputs.ItemsSource = videos;
         videos.CollectionChanged += (_, _) => QueueSummary.Text = videos.Count switch
@@ -447,9 +444,31 @@ public partial class MainWindow : Window
     { if (initialized && Source.Text.Length > 0) Estimate.Text = "Input changed. Add it, then Check fit for the combined duration."; }
     private void AddVideo(string input)
     {
-        videos.Add(new(input));
+        var item = new SourceVideo(input);
+        videos.Add(item);
         Inputs.SelectedIndex = videos.Count - 1;
         Estimate.Text = "List changed. Check fit before making the DVD.";
+        if (!item.IsLocal) _ = LoadTitleAsync(item);
+    }
+    private async Task<YouTubeInfo> LookupMetadataAsync(string input, CancellationToken token)
+    {
+        await titleSlots.WaitAsync(token);
+        try { return await Tools().YouTubeMetadataAsync(input, token); }
+        finally { titleSlots.Release(); }
+    }
+    private async Task LoadTitleAsync(SourceVideo item)
+    {
+        var pending = item.MetadataAsync(metadataLookup, CancellationToken.None);
+        UpdateCancelButton();
+        try { await pending; }
+        catch (OperationCanceledException) { /* The queue row reports cancellation or timeout. */ }
+        catch (Exception) { /* The queue row retains the lookup error and original URL. */ }
+        finally { UpdateCancelButton(); }
+    }
+    private async void RetryTitle(object sender, RoutedEventArgs e)
+    {
+        if (cancellation == null && Inputs.SelectedItem is SourceVideo item && !item.IsLocal)
+            await LoadTitleAsync(item);
     }
     private bool AddPending()
     {
@@ -466,7 +485,7 @@ public partial class MainWindow : Window
     private void AddInput(object sender, RoutedEventArgs e) => AddPending();
     private void InputSelected(object sender, SelectionChangedEventArgs e)
     {
-        rotation = (Inputs.SelectedItem as InputVideo)?.Rotation ?? 0;
+        rotation = (Inputs.SelectedItem as SourceVideo)?.Rotation ?? 0;
         if (Preview != null) Preview.Source = null;
         if (RotationLabel != null) RotationLabel.Text = $"Extra rotation: {rotation}°";
     }
@@ -482,6 +501,7 @@ public partial class MainWindow : Window
     {
         int index = Inputs.SelectedIndex;
         if (index < 0) return;
+        videos[index].CancelTitle();
         videos.RemoveAt(index); Inputs.SelectedIndex = Math.Min(index, videos.Count - 1);
         Estimate.Text = "List changed. Check fit for the updated duration.";
     }
@@ -495,7 +515,7 @@ public partial class MainWindow : Window
     }
     private IProgress<StageProgress> Reporter() => new Progress<StageProgress>(p =>
     { Stage.Text = p.Stage; Status.Text = p.Detail; Progress.IsIndeterminate = p.Fraction == null; Progress.Value = (p.Fraction ?? 0) * 100; });
-    private async Task<string> ResolveAsync(InputVideo item, MediaTools tools, IProgress<StageProgress> progress, CancellationToken token)
+    private async Task<string> ResolveAsync(SourceVideo item, MediaTools tools, IProgress<StageProgress> progress, CancellationToken token)
     {
         string input = item.Input;
         if (item.CachedSource != null && File.Exists(item.CachedSource)) return item.CachedSource;
@@ -515,7 +535,7 @@ public partial class MainWindow : Window
             if (File.Exists(source)) info = await tools.ProbeAsync(source, token);
             else
             {
-                var metadata = await tools.YouTubeMetadataAsync(item.Input, token);
+                var metadata = await item.MetadataAsync(metadataLookup, token);
                 info = new(metadata.Duration, 1920, 1080, 1, 0, true);
             }
             clips.Add(new(item.Input, info, item.Rotation));
@@ -536,14 +556,17 @@ public partial class MainWindow : Window
     private void Busy(bool value)
     {
         Options.IsEnabled = !value; BurnOptions.IsEnabled = !value;
-        StartButton.IsEnabled = !value; CancelButton.IsEnabled = value && !burning && !erasing;
+        StartButton.IsEnabled = !value;
+        CancelButton.IsEnabled = !burning && !erasing && (value || videos.Any(v => v.IsResolvingTitle));
     }
+    private void UpdateCancelButton() =>
+        CancelButton.IsEnabled = !burning && !erasing && (cancellation != null || videos.Any(v => v.IsResolvingTitle));
     private async void ShowPreview(object sender, RoutedEventArgs e) => await PreviewAsync();
     private async void Rotate(object sender, RoutedEventArgs e)
     {
         if (!AddPending()) return;
         rotation = (rotation + 90) % 360;
-        ((InputVideo)Inputs.SelectedItem).Rotation = rotation;
+        ((SourceVideo)Inputs.SelectedItem).Rotation = rotation;
         RotationLabel.Text = $"Extra rotation: {rotation}°"; await PreviewAsync();
     }
     private async Task PreviewAsync()
@@ -553,7 +576,7 @@ public partial class MainWindow : Window
         try
         {
             var tools = Tools(); var reporter = Reporter();
-            var selected = (InputVideo)Inputs.SelectedItem;
+            var selected = (SourceVideo)Inputs.SelectedItem;
             string source = await ResolveAsync(selected, tools, reporter, cancellation.Token);
             var info = await tools.ProbeAsync(source, cancellation.Token);
             // Preview remains available even when the selected disc cannot fit the source.
@@ -735,10 +758,16 @@ public partial class MainWindow : Window
         var thread = new Thread(() => { try { action(); completion.SetResult(); } catch (Exception ex) { completion.SetException(ex); } });
         thread.SetApartmentState(ApartmentState.STA); thread.Start(); return completion.Task;
     }
-    private void Cancel(object sender, RoutedEventArgs e) { if (!burning && !erasing) cancellation?.Cancel(); }
+    private void Cancel(object sender, RoutedEventArgs e)
+    {
+        if (burning || erasing) return;
+        cancellation?.Cancel();
+        foreach (var item in videos) item.CancelTitle();
+    }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (cancellation != null) { e.Cancel = true; Status.Text = erasing ? "Wait until disc erasure and readiness verification finish." : burning ? "Wait until disc writing and verification finish." : "Cancel the current operation before closing."; return; }
+        foreach (var item in videos) item.CancelTitle();
         foreach (string file in previewFiles)
         {
             try { File.Delete(file); }
