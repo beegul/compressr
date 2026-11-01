@@ -29,7 +29,7 @@ foreach ($entry in $manifest) {
 $managedPath = Join-Path $root '.compressr-portable.json'
 $managed = @{}
 if ((Test-Path -LiteralPath $managedPath) -and (Get-Item -LiteralPath $managedPath).Length -gt 0) {
-    foreach ($entry in (Get-Content -LiteralPath $managedPath -Raw | ConvertFrom-Json)) {
+    foreach ($entry in ([IO.File]::ReadAllText($managedPath) | ConvertFrom-Json)) {
         $managed[$entry.Path] = $entry.SHA256
     }
 }
@@ -43,7 +43,7 @@ $files = Get-ChildItem -LiteralPath $BundleDirectory -Recurse -File | Where-Obje
 }
 $plan = foreach ($file in $files) {
     $relative = $file.FullName.Substring($BundleDirectory.Length + 1)
-    if ($relative -notmatch '^(tools|licenses|cs|de|es|fr|it|ja|ko|pl|pt-BR|ru|tr|zh-Hans|zh-Hant)\\' -and
+    if ($relative -notmatch '^(tools|licenses|en|en-US|cs|de|es|fr|it|ja|ko|pl|pt-BR|ru|tr|zh-Hans|zh-Hant)\\' -and
         $relative -notmatch '^[^\\]+\.(dll|pdb)$' -and
         $relative -notin @('Compressr.exe', 'createdump.exe', 'Compressr.deps.json',
             'Compressr.runtimeconfig.json', 'START HERE.txt')) {
@@ -71,7 +71,25 @@ $plan = foreach ($file in $files) {
     [pscustomobject]@{
         Path = $relative; Source = $file.FullName; Target = $target; SHA256 = $hash
         OldHash = $oldHash; Exists = $exists; Changed = $oldHash -ne $hash
-        Stream = $null; Backup = $null; Written = $false
+        Stream = $null; Backup = $null; Written = $false; Remove = $false
+    }
+}
+$newPaths = @{}
+foreach ($entry in $plan) { $newPaths[$entry.Path] = $true }
+foreach ($relative in $managed.Keys) {
+    if ($relative -notmatch '^(cs|de|es|fr|it|ja|ko|pl|pt-BR|ru|tr|zh-Hans|zh-Hant)\\[^\\]+\.resources\.dll$' -or
+        $newPaths.ContainsKey($relative)) { continue }
+    $target = Join-Path $root $relative
+    if (!(Test-Path -LiteralPath $target)) { continue }
+    try { $hash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash }
+    catch { throw "Cannot read obsolete language file; close the program locking $target, then rebuild." }
+    if ($hash -ne $managed[$relative]) {
+        throw "Obsolete language file was edited; nothing copied. Relocate it before rebuilding: $target"
+    }
+    $plan += [pscustomobject]@{
+        Path = $relative; Source = $null; Target = $target; SHA256 = $null
+        OldHash = $hash; Exists = $true; Changed = $true
+        Stream = $null; Backup = $null; Written = $false; Remove = $true
     }
 }
 $backupRoot = Join-Path $root ('artifacts\placement-' + [guid]::NewGuid().ToString('N'))
@@ -80,7 +98,8 @@ $lock = $null
 $oldManifest = $null
 try {
     # One placement at a time; hold every changed existing file exclusively before writing.
-    $lock = [IO.File]::Open($managedPath, 'OpenOrCreate', 'ReadWrite', 'None')
+    try { $lock = [IO.File]::Open($managedPath, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch { throw "Ownership manifest is locked; close programs using $managedPath, then rebuild. $($_.Exception.Message)" }
     $oldManifest = New-Object byte[] ([int]$lock.Length)
     if ($oldManifest.Length) { $null = $lock.Read($oldManifest, 0, $oldManifest.Length) }
     foreach ($entry in $plan | Where-Object { $_.Changed -and $_.Exists }) {
@@ -95,7 +114,12 @@ try {
         }
     }
     foreach ($entry in $plan | Where-Object Changed) {
-        if ($entry.Exists) {
+        if ($entry.Remove) {
+            $entry.Stream.Dispose()
+            $entry.Stream = $null
+            [IO.File]::Delete($entry.Target)
+            $entry.Written = $true
+        } elseif ($entry.Exists) {
             $entry.Written = $true
             $source = [IO.File]::OpenRead($entry.Source)
             try {
@@ -119,7 +143,7 @@ try {
             }
         }
     }
-    $json = @($plan | Select-Object Path, SHA256) | ConvertTo-Json -Depth 3
+    $json = @($plan | Where-Object { !$_.Remove } | Select-Object Path, SHA256) | ConvertTo-Json -Depth 3
     $bytes = [Text.Encoding]::UTF8.GetBytes($json)
     $lock.Position = 0
     $lock.Write($bytes, 0, $bytes.Length)
@@ -127,7 +151,9 @@ try {
     $lock.Flush()
 } catch {
     foreach ($entry in $plan | Where-Object Written) {
-        if ($entry.Exists) {
+        if ($entry.Remove) {
+            [IO.File]::Copy($entry.Backup, $entry.Target, $false)
+        } elseif ($entry.Exists) {
             $backup = [IO.File]::OpenRead($entry.Backup)
             try {
                 $entry.Stream.Position = 0
@@ -147,6 +173,14 @@ try {
 } finally {
     foreach ($entry in $plan) { if ($entry.Stream) { $entry.Stream.Dispose() } }
     if ($lock) { $lock.Dispose() }
+}
+foreach ($culture in @('cs', 'de', 'es', 'fr', 'it', 'ja', 'ko', 'pl', 'pt-BR', 'ru', 'tr', 'zh-Hans', 'zh-Hant')) {
+    $directory = Join-Path $root $culture
+    if (!(Test-Path -LiteralPath $directory -PathType Container)) { continue }
+    # Remove only emptied culture directories; preserve any unknown files in them.
+    if (!(Get-ChildItem -LiteralPath $directory -Force | Select-Object -First 1)) {
+        Remove-Item -LiteralPath $directory -Force
+    }
 }
 Write-Host "Double-click: $(Join-Path $root 'Compressr.exe')"
 }

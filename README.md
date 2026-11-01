@@ -63,6 +63,12 @@ cached builds normally need no tool downloads. Launch needs no SDK, installer,
 PATH changes or worktree. Keep runtime DLLs, language folders, `licenses` and
 `tools` alongside the executable. DVD jobs need additional space as described below.
 
+This personal build is English-only: .NET publishes neutral/English resources,
+not non-English runtime satellite folders. Rebuilding an older bundle removes
+only unchanged, previously managed non-English satellite files and their empty
+folders. Unknown or edited files are preserved (edited managed files stop the
+build with an explicit error). Third-party tool resources and licenses remain intact.
+
 **Already have the personal portable ZIP?** Extract the entire ZIP, then
 double-click **Compressr.exe** inside the Compressr folder. Keep its `tools`,
 runtime DLLs and license notices together. No .NET installation, SDK, command

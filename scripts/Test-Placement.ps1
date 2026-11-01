@@ -65,5 +65,36 @@ try {
         throw 'Locked-file rejection changed the app.'
     }
     & $script -BundleDirectory $bundle
-    Write-Host 'PASS: first placement, repeat, managed update, README preservation, collision and locked-file safety.'
+    $satellite = Join-Path $bundle 'de\Example.resources.dll'
+    New-Item -ItemType Directory -Path (Split-Path $satellite -Parent) | Out-Null
+    Set-Content -LiteralPath $satellite -Value 'managed satellite'
+    Write-Manifest
+    & $script -BundleDirectory $bundle
+    $placedSatellite = Join-Path $checkout 'de\Example.resources.dll'
+    Set-Content -LiteralPath (Join-Path $checkout 'de\personal.txt') -Value 'keep me'
+    Remove-Item -LiteralPath $satellite
+    Write-Manifest
+    Set-Content -LiteralPath $placedSatellite -Value 'edited satellite'
+    Expect-Failure 'Obsolete language file was edited; nothing copied.*'
+    Set-Content -LiteralPath $placedSatellite -Value 'managed satellite'
+    $locked = [IO.File]::Open($placedSatellite, 'Open', 'ReadWrite', 'None')
+    try { Expect-Failure 'Cannot read obsolete language file*' }
+    finally { $locked.Dispose() }
+    & $script -BundleDirectory $bundle
+    & $script -BundleDirectory $bundle
+    if ((Test-Path -LiteralPath $placedSatellite) -or
+        (Get-Content -LiteralPath (Join-Path $checkout 'de\personal.txt')) -ne 'keep me' -or
+        (Get-Content -LiteralPath (Join-Path $checkout '.compressr-portable.json') -Raw) -match 'Example.resources') {
+        throw 'Obsolete satellite cleanup did not preserve unknown files or update ownership.'
+    }
+    $satellite = Join-Path $bundle 'fr\Example.resources.dll'
+    New-Item -ItemType Directory -Path (Split-Path $satellite -Parent) | Out-Null
+    Set-Content -LiteralPath $satellite -Value 'managed satellite'
+    Write-Manifest
+    & $script -BundleDirectory $bundle
+    Remove-Item -LiteralPath $satellite
+    Write-Manifest
+    & $script -BundleDirectory $bundle
+    if (Test-Path -LiteralPath (Join-Path $checkout 'fr')) { throw 'Empty obsolete culture folder remains.' }
+    Write-Host 'PASS: placement/update safety and obsolete satellites (edited, locked, unknown files, empty folders, repeat).'
 } finally { Remove-Item -LiteralPath $scratch -Recurse }
