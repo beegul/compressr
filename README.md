@@ -15,7 +15,10 @@ Saved ISOs also reopen and verify independently of original source/job folders.
 The focused/integration run passed 168 assertions, including image rejection,
 capacity boundaries, image locking and read-back corruption.
 The YouTube path has downloaded and probed Blender's Creative Commons
-*Big Buck Bunny* test video. Physical burning has **not** been performed.
+*Big Buck Bunny* test video. One user-authorized physical DVD+RW burn on an
+HL-DT-ST GT50N succeeded: finalisation returned successfully, all five VIDEO_TS
+files matched the saved ISO, and actual on-disc PAL video/audio decoded correctly.
+Standalone-player playback and full-disc/dual-layer burns remain untested.
 
 ## Setup and launch
 
@@ -191,8 +194,9 @@ physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
 **Save screenshot** captures the running window to
 `%LOCALAPPDATA%\Compressr\screenshot.png` for personal review.
 
-Physical DVD writing, finalised disc read-back, older player compatibility,
-and dual-layer layer-break behaviour require real hardware and remain untested.
+Short PAL DVD+RW writing and file read-back have been tested on the attached
+GT50N. Older player compatibility, other physical media, near-capacity burns
+and dual-layer layer-break behaviour remain untested.
 
 ## Four-part concert fit example
 
@@ -226,6 +230,17 @@ Use **SingleLayer** when preparing for these discs: the 2:54:32 concert metadata
 still budgets **3.063 Mbps** video. A dual-layer preparation at 5.748 Mbps would
 not fit this single-layer disc.
 
-Nothing was burned, erased, formatted or ejected. This confirms software/device
-preflight compatibility, not a successful physical burn or playback on a UK
-set-top player. The concert was not downloaded or tested end-to-end.
+The initial inspection was read-only. In a subsequent user-authorized test,
+**one** generated ordered red/blue/green PAL ISO was burned through the app.
+IMAPI writing/finalisation and the app's read-back verification succeeded;
+all five actual VIDEO_TS files matched the saved image by size/SHA-256.
+On-disc ffprobe confirmed MPEG-2, 720x576, 25 fps, 16:9, AC-3 stereo 48 kHz.
+Strict sequential video/audio decode passed; decoded samples proved clip order,
+rotated portrait bars and silent middle audio. Actual navigation is region-free
+and jumps directly to title 1; readable physical descriptors show ISO9660/UDF 1.02.
+No erase, retry or eject was performed; the disc is now nonblank with the short
+test DVD on it. Windows raw reads exposed 457 sectors, all identical to the ISO,
+but did not expose its remaining padding/backup-anchor tail; this is not a
+full sector-for-sector verification of the complete ISO.
+Playback on a UK set-top player, near-capacity/long burns and dual-layer writing
+remain unverified. The concert was not downloaded or tested end-to-end.
