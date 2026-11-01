@@ -33,6 +33,12 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         Inputs.ItemsSource = videos;
+        videos.CollectionChanged += (_, _) => QueueSummary.Text = videos.Count switch
+        {
+            0 => "Play order",
+            1 => "1 video · plays in full",
+            _ => $"{videos.Count} videos · play in this order"
+        };
         Standard.ItemsSource = Enum.GetValues<TelevisionSystem>();
         Capacity.ItemsSource = Enum.GetValues<DiscSize>();
         Output.ItemsSource = new[] { "DVD-ready ISO (burn later)", "DVD folder" };

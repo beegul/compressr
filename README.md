@@ -5,6 +5,17 @@ and permitted YouTube videos into one continuous autoplay DVD-Video, without a s
 HandBrake step or codec settings. Includes a local personal portable packaging
 command, not an installer or signed public release.
 
+The main window follows **your videos → your DVD → Prepare DVD**. Browse or
+drop one or several files, or add a permitted YouTube link; the queue is the
+playback order. Orientation preview and rotation stay beside the queue. The DVD
+panel contains PAL/NTSC, 4.7/8.5 GB capacity, ISO/folder output and Check fit.
+**Burn a saved ISO later** expands the separate writer, Check disc and burn controls.
+Preparation and status remain visible while the content scrolls on smaller screens.
+The interface uses the native Segoe UI family, a restrained teal accent, readable
+sentence-case labels and keyboard focus indicators, following
+[Windows typography guidance](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography)
+and [accessible text contrast guidance](https://learn.microsoft.com/en-us/windows/apps/design/accessibility/accessible-text-requirements).
+
 ## Current verification status
 
 The desktop app builds with **zero warnings/errors**. Generated-media checks
@@ -253,6 +264,8 @@ burning; writing/finalising and read-back must finish before the app closes.
 ```powershell
 dotnet build .\Compressr.App\Compressr.App.csproj -c Release
 .\scripts\Test.ps1
+# Native UI checks, using PowerShell 7 in STA mode after the Release build.
+pwsh -STA -File .\scripts\Test-Interface.ps1
 .\scripts\Test-Placement.ps1
 .\scripts\Test.ps1 -Integration
 # Optional: supply a video you have permission to download.
@@ -262,6 +275,12 @@ dotnet build .\Compressr.App\Compressr.App.csproj -c Release
 Placement checks cover first placement, repeat builds, managed replacement,
 source README preservation, unexpected collisions and locked-file rejection
 using disposable fixtures, without downloads or disc operations.
+
+Native interface checks cover retained controls and handlers, empty/single/multiple
+queues, reordering/removal, busy/idle state, output choices, burn-later access,
+compact-window layout and text-token contrast. An optional `-ScreenshotDirectory`
+captures offscreen WPF renders; these complement, rather than replace, inspection
+of the running window. No URL is downloaded and no physical disc is written.
 
 The dependency-free console test harness checks exact fit boundaries for both
 capacities, invalid inputs, bitrate/mux budget, sample aspect, metadata/manual
