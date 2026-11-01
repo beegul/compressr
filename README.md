@@ -341,7 +341,13 @@ physical disc is written.
 
 The dependency-free console test harness checks exact fit boundaries for both
 capacities, invalid inputs, bitrate/mux budget, sample aspect, metadata/manual
-rotation, padding, half-D1, ordered/combined fit and URL validation. Integration generates landscape
+rotation, padding, half-D1, ordered/combined fit and URL validation. Process
+fixtures verify that an already-cancelled operation launches nothing, cancellation
+stops the tool and its descendant, failed progress callbacks terminate the tool
+without losing the original error, and nonzero exits retain diagnostics.
+ISO validation and read-back hashing run off the caller's UI context; integration
+checks this with a tracking synchronization context as well as file validation.
+Integration generates landscape
 with audio, a silent phone-style file with rotation metadata, PAL and NTSC
 outputs, a manual rotation case and half-D1 encoding. It authors DVD folders and ISOs, probes
 decoded VOB codecs/geometry/DAR/frame rate/audio, checks actual decoded portrait side bars,

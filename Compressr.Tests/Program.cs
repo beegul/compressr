@@ -2,6 +2,21 @@ using System.Globalization;
 using System.Text.Json;
 using Compressr.Core;
 
+if (args.FirstOrDefault() == "--process-fixture")
+{
+    Environment.ExitCode = await ReliabilityTests.RunFixtureAsync(args[1..]);
+    return;
+}
+if (args.FirstOrDefault() == "--image-context")
+{
+    await ReliabilityTests.RunImageContextAsync(args[1], args[2], new Progress<StageProgress>(), (condition, message) =>
+    {
+        if (!condition) throw new Exception("FAIL: " + message);
+        Console.WriteLine("PASS: " + message);
+    });
+    return;
+}
+
 int assertions = 0;
 void Check(bool condition, string message)
 {
@@ -141,6 +156,8 @@ Throws<ArgumentOutOfRangeException>(() => selection.Choose((OutputKind)99), "inv
 Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
 await DiscPreparationTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
+await ReliabilityTests.RunProcessAsync(Check);
+Console.WriteLine($"PASS: {assertions} focused assertions including tool process cleanup");
 
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
@@ -347,3 +364,6 @@ using (var dvd = await PreparedDvd.OpenAsync(validIso, progress, token))
     catch (IOException) { Check(true, "read-back corruption explicitly rejected"); }
 }
 Console.WriteLine($"PASS: {assertions} total assertions; generated ISO/VIDEO_TS results in {root}");
+await ReliabilityTests.RunImageContextAsync(Path.Combine(root, "landscape-pal.iso"),
+    Path.Combine(root, "landscape-pal", "dvd", "VIDEO_TS"), progress, Check);
+Console.WriteLine($"PASS: {assertions} total assertions including background image validation/read-back");

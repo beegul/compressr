@@ -17,15 +17,17 @@ public sealed class PreparedDvd : IDisposable
     private PreparedDvd(string path)
     {
         Path = System.IO.Path.GetFullPath(path);
-        image = new(Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        image = new(Path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
     }
 
-    public static async Task<PreparedDvd> OpenAsync(string path, IProgress<StageProgress> progress, CancellationToken token)
+    public static Task<PreparedDvd> OpenAsync(string path, IProgress<StageProgress> progress, CancellationToken token)
+        => Task.Run(async () =>
     {
+        token.ThrowIfCancellationRequested();
         var dvd = new PreparedDvd(path);
-        try { await dvd.InspectAsync(progress, token); return dvd; }
+        try { await dvd.InspectAsync(progress, token).ConfigureAwait(false); return dvd; }
         catch { dvd.Dispose(); throw; }
-    }
+    }, token);
 
     public static void CheckCapacity(long imageBytes, long availableBytes)
     {
@@ -178,7 +180,7 @@ public sealed class PreparedDvd : IDisposable
             while (remaining > 0)
             {
                 int count = (int)Math.Min(buffer.Length, remaining);
-                await image.ReadExactlyAsync(buffer.AsMemory(0, count), token);
+                await image.ReadExactlyAsync(buffer.AsMemory(0, count), token).ConfigureAwait(false);
                 if (entry.Name.EndsWith(".VOB"))
                     for (int offset = 0; offset < count; offset += 2048)
                         if (buffer[offset] != 0 || buffer[offset + 1] != 0 || buffer[offset + 2] != 1 || buffer[offset + 3] != 0xba)
@@ -198,18 +200,23 @@ public sealed class PreparedDvd : IDisposable
         Files = files;
     }
 
-    public async Task VerifyDirectoryAsync(string videoTs, IProgress<StageProgress> progress, CancellationToken token)
+    public Task VerifyDirectoryAsync(string videoTs, IProgress<StageProgress> progress, CancellationToken token)
+        => Task.Run(async () =>
     {
         for (int i = 0; i < Files.Count; i++)
         {
+            token.ThrowIfCancellationRequested();
             var file = Files[i];
             progress.Report(new("Verify", (double)i / Files.Count, $"Reading back {file.Name}…"));
-            await using var copy = File.OpenRead(System.IO.Path.Combine(videoTs, file.Name));
-            byte[] hash = await SHA256.HashDataAsync(copy, token);
-            if (copy.Length != file.Length || !CryptographicOperations.FixedTimeEquals(file.Hash, hash))
+            await using var copy = new FileStream(System.IO.Path.Combine(videoTs, file.Name),
+                FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (copy.Length != file.Length)
+                throw new IOException($"Read-back verification failed for {file.Name}. Do not rely on this disc.");
+            byte[] hash = await SHA256.HashDataAsync(copy, token).ConfigureAwait(false);
+            if (!CryptographicOperations.FixedTimeEquals(file.Hash, hash))
                 throw new IOException($"Read-back verification failed for {file.Name}. Do not rely on this disc.");
         }
-    }
+    }, token);
 
     public void Dispose() => image.Dispose();
 }

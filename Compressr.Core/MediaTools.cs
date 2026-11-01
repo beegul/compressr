@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 
 namespace Compressr.Core;
@@ -35,6 +36,7 @@ public sealed class MediaTools
     public async Task<string> RunAsync(string tool, IEnumerable<string> args, CancellationToken cancellation,
         Action<string>? line = null, string? workingDirectory = null)
     {
+        cancellation.ThrowIfCancellationRequested();
         var start = new ProcessStartInfo(tool)
         {
             UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
@@ -43,25 +45,34 @@ public sealed class MediaTools
         foreach (var arg in args) start.ArgumentList.Add(arg);
         using var process = new Process { StartInfo = start };
         process.Start();
-        using var registration = cancellation.Register(() =>
+        void StopProcess()
         {
             try { if (!process.HasExited) process.Kill(true); }
             catch (InvalidOperationException) { /* Process exited between the check and kill. */ }
-        });
+        }
+        using var registration = cancellation.Register(StopProcess);
         var output = new System.Text.StringBuilder();
         var errors = new Queue<string>();
+        Exception? callbackError = null;
         async Task ReadAsync(StreamReader reader, bool error)
         {
-            while (await reader.ReadLineAsync() is { } text)
+            while (await reader.ReadLineAsync().ConfigureAwait(false) is { } text)
             {
                 if (error) { errors.Enqueue(text); if (errors.Count > 80) errors.Dequeue(); }
                 else output.AppendLine(text);
-                line?.Invoke(text);
+                if (line != null && Volatile.Read(ref callbackError) == null)
+                {
+                    try { line(text); }
+                    catch (Exception ex)
+                    {
+                        if (Interlocked.CompareExchange(ref callbackError, ex, null) == null) StopProcess();
+                    }
+                }
             }
-
         }
         await Task.WhenAll(ReadAsync(process.StandardOutput, false), ReadAsync(process.StandardError, true),
-            process.WaitForExitAsync(CancellationToken.None));
+            process.WaitForExitAsync(CancellationToken.None)).ConfigureAwait(false);
+        if (callbackError != null) ExceptionDispatchInfo.Capture(callbackError).Throw();
         cancellation.ThrowIfCancellationRequested();
         if (process.ExitCode != 0)
             throw new InvalidOperationException($"{Path.GetFileName(tool)} failed ({process.ExitCode}).\n{string.Join("\n", errors)}");
