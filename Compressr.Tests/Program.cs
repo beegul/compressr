@@ -194,6 +194,7 @@ await DiscPreparationTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
 await ReliabilityTests.RunProcessAsync(Check);
 await SourceVideoTests.RunAsync(Check);
+await ProgressReadbackTests.RunAsync(Check);
 Console.WriteLine($"PASS: {assertions} focused assertions including tool process cleanup");
 
 if (!args.Contains("--integration")) return;
@@ -206,6 +207,7 @@ string original = Path.Combine(root, "landscape.mp4");
 await tools.RunAsync(tools.Ffmpeg, ["-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25",
     "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-t", "3",
     "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", original], token);
+await ProgressReadbackTests.RunDownloadIntegrationAsync(tools, original, Path.Combine(root, "loopback-download.mp4"), Check);
 string silent = Path.Combine(root, "phone-rotation.mp4");
 await tools.RunAsync(tools.Ffmpeg, ["-y", "-display_rotation:v:0", "90", "-i", original,
     "-map", "0:v:0", "-c", "copy", silent], token);

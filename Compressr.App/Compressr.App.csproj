@@ -6,7 +6,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AssemblyName>Compressr</AssemblyName>
+    <ApplicationIcon>Assets\Compressr.ico</ApplicationIcon>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="..\Compressr.Core\Compressr.Core.csproj" /></ItemGroup>
+  <ItemGroup><Resource Include="Assets\Compressr.ico" /></ItemGroup>
 </Project>

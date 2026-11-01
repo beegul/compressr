@@ -216,7 +216,12 @@ public static class DiscWriter
             Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(dvd.Path, 0x20, 0, false, null, out stream));
             ReadMedia(recorder, format).Check(dvd.Length);
             progress.Report(new("Burn", null, "Writing and finalising the disc. Do not remove it. This stage cannot be cancelled."));
-            format.Write(stream);
+            try { format.Write(stream); }
+            catch (Exception ex) when (ex is COMException or IOException)
+            {
+                throw new IOException($"Writing / finalising DVD failed in {drive.Label}: {ex.Message} (HRESULT 0x{ex.HResult:X8}).\n" +
+                    $"The disc is NOT verified. Keep the prepared ISO at {dvd.Path}. Check the disc, drive and connection; do not erase or retry automatically.", ex);
+            }
         }
         finally { Release(stream); Release(formatObject); Release(recorderObject); }
     }
@@ -228,7 +233,12 @@ public static class DiscWriter
         for (int i = 0; i < 30 && !Directory.Exists(target); i++) await Task.Delay(1000);
         if (drive.Mount.Length == 0 || !Directory.Exists(target))
             throw new IOException("Burn completed, but Windows did not mount the disc for verification. The disc is not verified.");
-        await dvd.VerifyDirectoryAsync(target, progress, CancellationToken.None);
+        try { await dvd.VerifyDirectoryAsync(target, progress, CancellationToken.None); }
+        catch (DvdReadbackException ex)
+        {
+            throw new IOException($"Read-back from {drive.Label} failed after the write/finalise call returned.\n{ex.Message}\n" +
+                $"Prepared ISO retained at {dvd.Path}. A successful write return alone does not prove a readable DVD.", ex);
+        }
     }
 
     [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, PreserveSig = true)]

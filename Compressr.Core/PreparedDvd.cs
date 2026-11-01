@@ -201,22 +201,7 @@ public sealed class PreparedDvd : IDisposable
     }
 
     public Task VerifyDirectoryAsync(string videoTs, IProgress<StageProgress> progress, CancellationToken token)
-        => Task.Run(async () =>
-    {
-        for (int i = 0; i < Files.Count; i++)
-        {
-            token.ThrowIfCancellationRequested();
-            var file = Files[i];
-            progress.Report(new("Verify", (double)i / Files.Count, $"Reading back {file.Name}…"));
-            await using var copy = new FileStream(System.IO.Path.Combine(videoTs, file.Name),
-                FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous | FileOptions.SequentialScan);
-            if (copy.Length != file.Length)
-                throw new IOException($"Read-back verification failed for {file.Name}. Do not rely on this disc.");
-            byte[] hash = await SHA256.HashDataAsync(copy, token).ConfigureAwait(false);
-            if (!CryptographicOperations.FixedTimeEquals(file.Hash, hash))
-                throw new IOException($"Read-back verification failed for {file.Name}. Do not rely on this disc.");
-        }
-    }, token);
+        => DvdReadback.VerifyAsync(Files, videoTs, progress, token);
 
     public void Dispose() => image.Dispose();
 }

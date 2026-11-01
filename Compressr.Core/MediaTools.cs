@@ -138,18 +138,24 @@ public sealed class MediaTools
         return new(title, duration);
     }
 
-    public async Task<string> DownloadAsync(string url, string directory, IProgress<StageProgress> progress, CancellationToken token)
+    public async Task<string> DownloadAsync(string url, string directory, IProgress<StageProgress> progress, CancellationToken token,
+        string source = "Video")
     {
         var uri = ValidateYouTube(url);
         Directory.CreateDirectory(directory);
-        progress.Report(new("Download", null, "Downloading one video with yt-dlp…"));
-        var args = new List<string> { "--no-playlist", "--newline", "--no-progress", "--ffmpeg-location",
+        progress.Report(new("Download", null, $"{source}\nConnecting to YouTube. Download size and speed are not known yet."));
+        var args = new List<string> { "--no-playlist", "--newline", "--progress", "--no-colors", "--progress-delta", "0.5",
+            "--progress-template", "download:" + DownloadProgress.DownloadPrefix + "%(progress)j",
+            "--progress-template", "postprocess:" + DownloadProgress.ProcessPrefix + "%(progress)j", "--ffmpeg-location",
             Path.GetDirectoryName(Ffmpeg)!, "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",
             "--merge-output-format", "mkv", "-o", Path.Combine(directory, "source.%(ext)s") };
         string deno = Path.Combine(Path.GetDirectoryName(YtDlp)!, "deno.exe");
         if (File.Exists(deno)) args.AddRange(["--js-runtimes", "deno:" + deno]);
         args.AddRange(["--", uri.AbsoluteUri]);
-        await RunAsync(YtDlp, args, token);
+        await RunAsync(YtDlp, args, token, line =>
+        {
+            if (DownloadProgress.Parse(line, source) is { } update) progress.Report(update);
+        });
         var files = Directory.GetFiles(directory, "source.*").Where(p => !p.EndsWith(".part")).ToArray();
         if (files.Length != 1) throw new InvalidOperationException("yt-dlp did not produce a single complete video.");
         return files[0];

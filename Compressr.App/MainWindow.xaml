@@ -1,6 +1,6 @@
 <Window x:Class="Compressr.App.MainWindow" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:core="clr-namespace:Compressr.Core;assembly=Compressr.Core"
-        Title="Compressr — Video in. DVD out." Width="1024" Height="960" MinWidth="720" MinHeight="690" Background="White" WindowStartupLocation="CenterScreen"
+        Title="Compressr — Video in. DVD out." Icon="Assets/Compressr.ico" Width="1024" Height="960" MinWidth="720" MinHeight="690" Background="White" WindowStartupLocation="CenterScreen"
         FontFamily="Segoe UI Variable, Segoe UI" FontSize="14" Foreground="{StaticResource Ink}"
         AllowDrop="True" PreviewDrop="OnDrop" PreviewDragOver="OnDragOver" Closing="OnClosing">
   <Grid Background="White" SizeChanged="WorkspaceSizeChanged">

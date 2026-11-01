@@ -650,7 +650,8 @@ public partial class MainWindow : Window
         if (item.CachedSource != null && File.Exists(item.CachedSource)) return item.CachedSource;
         if (File.Exists(input)) return input;
         MediaTools.ValidateYouTube(input);
-        item.CachedSource = await tools.DownloadAsync(input, Path.Combine(stateDirectory, "downloads", Guid.NewGuid().ToString("N")), progress, token);
+        string context = $"Video {videos.IndexOf(item) + 1} of {videos.Count} · {item.Label}";
+        item.CachedSource = await tools.DownloadAsync(input, Path.Combine(stateDirectory, "downloads", Guid.NewGuid().ToString("N")), progress, token, context);
         return item.CachedSource;
     }
     private long? AvailableCapacityBytes() => outputSelection.Selected == OutputKind.Burn && currentInspection != null &&

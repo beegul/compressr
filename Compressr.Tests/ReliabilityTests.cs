@@ -63,6 +63,14 @@ internal static class ReliabilityTests
             try { await tools.RunAsync(fixture.Tool, fixture.Arguments, CancellationToken.None); check(false, "tool failure"); }
             catch (InvalidOperationException ex)
             { check(ex.Message.Contains("fixture diagnostic") && ex.Message.Contains("(17)"), "tool exit diagnostics preserved"); }
+            fixture = ChildArguments("download-progress");
+            var reports = new System.Collections.Concurrent.ConcurrentQueue<StageProgress>();
+            await tools.RunAsync(fixture.Tool, fixture.Arguments, CancellationToken.None, text =>
+            {
+                if (DownloadProgress.Parse(text, "Video 1 of 2 · Fixture") is { } value) reports.Enqueue(value);
+            });
+            check(reports.Any(p => p.Stage == "Download" && p.Fraction == .5) && reports.Any(p => p.Stage == "Merge"),
+                "stdout/stderr process pipeline delivers structured download and merge updates");
         }
         finally { Directory.Delete(state, true); }
     }
@@ -135,6 +143,11 @@ internal static class ReliabilityTests
             case "failure":
                 Console.Error.WriteLine("fixture diagnostic");
                 return 17;
+            case "download-progress":
+                Console.WriteLine(DownloadProgress.DownloadPrefix + """{"status":"downloading","downloaded_bytes":50,"total_bytes":100,"speed":10,"eta":5}""");
+                await Task.Delay(50);
+                Console.Error.WriteLine("[Merger] Merging formats into fixture.mkv");
+                return 0;
             default: throw new ArgumentException("Unknown process fixture.");
         }
     }

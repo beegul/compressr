@@ -140,6 +140,13 @@ try {
         }
     }
     Check ($window.FontSize -eq 14) 'Readable 14 DIP body typography'
+    Check ($null -ne $window.Icon -and $window.Icon.Width -ge 16) 'Window/taskbar uses original embedded Compressr icon'
+    $iconBytes = [IO.File]::ReadAllBytes((Join-Path $root 'Compressr.App\Assets\Compressr.ico'))
+    Check ([BitConverter]::ToUInt16($iconBytes, 0) -eq 0 -and [BitConverter]::ToUInt16($iconBytes, 2) -eq 1 -and
+        [BitConverter]::ToUInt16($iconBytes, 4) -eq 9) 'Multi-resolution ICO has nine valid native entries'
+    $decoder = [Windows.Media.Imaging.IconBitmapDecoder]::new([Uri]::new((Join-Path $root 'Compressr.App\Assets\Compressr.ico')),
+        [Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat, [Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+    Check (($decoder.Frames | ForEach-Object PixelWidth | Sort-Object) -join ',' -eq '16,20,24,32,40,48,64,128,256') 'Native decoder reads all 16 through 256 px icon frames'
     Check ($null -eq $window.GetType().GetMethod('SaveScreenshot', [Reflection.BindingFlags]'Instance,NonPublic')) 'User-facing screenshot functionality removed'
     foreach ($removed in @('CheckFit', 'CheckDisc', 'PrepareDisc', 'RefreshDrives')) {
         Check ($null -eq $window.GetType().GetMethod($removed, [Reflection.BindingFlags]'Instance,NonPublic')) "Manual $removed action removed; orchestration uses Make DVD"
@@ -480,6 +487,45 @@ try {
         Check ($ratio -ge 4.5) "Text contrast $($pair[0]) / $($pair[1])"
         Write-Host ("Contrast {0} / {1}: {2:F2}:1" -f $pair[0], $pair[1], $ratio)
     }
+    $ui.WorkspaceTabs.SelectedIndex = 0
+    [DiscMonitorFixture]::Drives = @()
+    [DiscMonitorFixture]::Failure = $null
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    $ui.Output.SelectedIndex = 0
+    $window.GetType().GetField('isoDestination', [Reflection.BindingFlags]'Instance,NonPublic').SetValue(
+        $window, [string](Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Compressr.iso'))
+    Invoke-Handler 'UpdateOutput' @()
+    while ($ui.Inputs.Items.Count -gt 0) { Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new()) }
+    foreach ($number in @(1, 2, 3)) {
+        $url = "https://youtu.be/progress-fixture-$number"
+        Invoke-Handler 'AddVideo' @($url)
+        $titleRequests[$url].SetResult([Compressr.Core.YouTubeInfo]::new("Generated sample video $number", 120))
+    }
+    Await-Estimate
+    $ui.Inputs.SelectedIndex = 1
+    Layout 1008 921
+    Invoke-Handler 'Busy' @($true)
+    $reporter = Invoke-Handler 'Reporter' @()
+    $value = [Compressr.Core.DownloadProgress]::Parse(
+        'COMPRESSR_DOWNLOAD:{"status":"downloading","downloaded_bytes":25000000,"total_bytes":100000000,"speed":2000000,"eta":38}',
+        'Video 2 of 3 · Generated sample video 2')
+    $reporter.Report($value)
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Stage.Text -eq 'Download' -and $ui.Progress.Value -eq 25 -and !$ui.Progress.IsIndeterminate -and
+        $ui.Status.Text.Contains('Video 2 of 3') -and $ui.Status.Text.Contains('ETA 0:38')) 'Native UI displays real parsed bytes/percent/speed/ETA and clip identity'
+    Screenshot 'download-progress.png'
+    $reporter.Report([Compressr.Core.DownloadProgress]::Parse('[Merger] Merging video and audio', 'Video 2 of 3 · Generated sample video 2'))
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Stage.Text -eq 'Merge' -and $ui.Progress.IsIndeterminate -and $ui.Status.Text.Contains('merging has no percentage')) 'Native merge UI never invents a percentage'
+    Screenshot 'download-merge.png'
+    Invoke-Handler 'Busy' @($false)
+    Await-Estimate
+    $ui.Stage.Text = 'Disc not verified'
+    $ui.Status.Text = [Compressr.Core.DvdReadbackException]::new('D:\VIDEO_TS\VTS_01_1.VOB', 1048576,
+        'Windows reported a cyclic redundancy check (CRC) read error (error 23). Check the disc, drive and connection.', $true, $null).Message
+    Layout 1008 921
+    Check ($ui.Status.ActualHeight -le 76 -and $ui.Status.Text.Contains('NOT verified')) 'Detailed CRC recovery stays readable and scrollable without hiding the main action'
+    Screenshot 'dvd-read-error.png'
     Write-Host "PASS: $script:checks native interface assertions (no media downloaded or disc written)"
 } finally {
     $window.Close()

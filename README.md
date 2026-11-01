@@ -291,9 +291,14 @@ YouTube `t=`, `start=` or `#t=` playback timestamps are incidental: **the whole
 video is used**, not just the portion after that timestamp. There is no trimming
 feature. Every listed source is included in full.
 The stages report download, two-pass conversion with percentage, authoring,
-image creation, disc preflight/preparation, burn/finalisation and file read-back verification. Download,
-authoring, imaging and burning currently show indeterminate progress rather
-than invented percentages. Cancellation kills child tool processes before
+image creation, disc preflight/preparation, burn/finalisation and file read-back verification.
+Downloads show the current clip's title/index, current-stream percentage, bytes
+downloaded/total, speed and ETA supplied by yt-dlp. Approximate totals use `~`;
+unknown totals remain indeterminate. Separate video/audio downloads can restart
+the current-stream meter. Merging/post-processing is a separate indeterminate
+stage; a downloaded stream is not yet the finished clip. Authoring, imaging and
+burning also remain indeterminate rather than inventing percentages.
+Cancellation kills child tool processes before
 burning; disc erasure, writing/finalising and their verification must finish
 before the app closes. Cancelling later work does not undo a confirmed erasure.
 
@@ -346,6 +351,13 @@ before the app closes. Cancelling later work does not undo a confirmed erasure.
   It is file-level read-back, not an exhaustive sector scan or
   proof of playback on a particular set-top player. Verification failure is
   shown explicitly even after a burn has completed.
+  Read-back progress advances through bytes within each VOB. Windows read failures
+  (including CRC), missing/wrong-length files and SHA-256 mismatches are reported
+  separately with the file and byte position. A CRC means Windows could not return
+  readable data, not merely that a hash differed. The app keeps the ISO and never
+  ignores errors, retries unreadable media automatically or reports verification
+  success after a CRC. Check the disc, drive and connection before any manual next
+  action; a successful IMAPI write/finalise return does not prove a readable DVD.
 - One continuous title only; no chapter/menu editor, subtitles, DRM, source
   splitting, or advanced quality controls. HDR/10-bit tone mapping and damaged
   or unusual streams are not specifically supported. FFmpeg/yt-dlp failures
@@ -353,6 +365,11 @@ before the app closes. Cancelling later work does not undo a confirmed erasure.
 - Downloads and per-job work are retained under `%LOCALAPPDATA%\Compressr`
   for troubleshooting; remove specific completed job/download folders manually
   when no operation is running. Temporary preview frames are removed on close.
+
+The original navy/teal disc-and-play icon is embedded in the executable and the
+WPF window/taskbar at 16, 20, 24, 32, 40, 48, 64, 128 and 256 pixels. Portable builds
+carry the same icon without an external runtime icon file. Its geometry can be
+regenerated with `.\scripts\New-AppIcon.ps1`; no third-party artwork or fonts are used.
 
 ## Development and verification
 
