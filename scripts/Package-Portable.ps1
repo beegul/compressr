@@ -1,8 +1,8 @@
-param([string]$OutputDirectory, [switch]$SkipZip)
+param([string]$OutputDirectory, [switch]$SkipZip, [switch]$RepositoryRoot)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 if (!$OutputDirectory) {
-    $OutputDirectory = Join-Path $root ("artifacts\portable-" + (Get-Date -Format 'yyyyMMdd-HHmmss') + '\Compressr')
+    $OutputDirectory = Join-Path $root ("artifacts\portable-" + [guid]::NewGuid().ToString('N') + '\Compressr')
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path $OutputDirectory) { throw 'Choose a new output directory; existing packages are never overwritten.' }
@@ -51,7 +51,7 @@ Copy-Item (Join-Path $root 'scripts\Portable-Quick-Start.txt') (Join-Path $Outpu
 Copy-Item (Join-Path $root 'README.md') $OutputDirectory
 $manifest = Get-ChildItem $OutputDirectory -Recurse -File | ForEach-Object {
     [pscustomobject]@{
-        Path = [IO.Path]::GetRelativePath($OutputDirectory, $_.FullName)
+        Path = $_.FullName.Substring($OutputDirectory.TrimEnd('\').Length + 1)
         Bytes = $_.Length
         SHA256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
     }
@@ -64,3 +64,6 @@ if (!$SkipZip) {
     Write-Host "ZIP: $zip"
 }
 Write-Host "Double-click: $(Join-Path $OutputDirectory 'Compressr.exe')"
+if ($RepositoryRoot) {
+    & (Join-Path $PSScriptRoot 'Place-Portable.ps1') -BundleDirectory $OutputDirectory
+}

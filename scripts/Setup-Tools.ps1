@@ -28,7 +28,9 @@ if (!(Test-Path (Join-Path $tools 'ffmpeg.exe')) -or !(Test-Path (Join-Path $too
 # The portable package supplies native dvdauthor/mkisofs with their runtime DLLs.
 # Pin and verify the PortableApps-published SHA-256; unpack without running the installer.
 $dvdBin = Join-Path $tools 'DVDStylerPortable\App\DVDStyler\bin'
-if (!(Test-Path (Join-Path $dvdBin 'dvdauthor.exe'))) {
+if (!(Test-Path (Join-Path $dvdBin 'dvdauthor.exe')) -or
+    !(Test-Path (Join-Path $dvdBin 'mkisofs.exe')) -or
+    !(Test-Path (Join-Path $tools 'DVDStylerPortable\App\DVDStyler\COPYING'))) {
     $package = Join-Path $tools 'DVDStylerPortable_3.2.1.paf.exe'
     Invoke-WebRequest 'https://portableapps.com/redir2/?a=DVDStylerPortable&s=s&d=pa&f=DVDStylerPortable_3.2.1.paf.exe' -OutFile $package
     $expected = 'cd52e3c2b7e475f9dcc84e9e4b25e4fd2e9f7753ba705c24fc8cbf0a4b32db82'
@@ -54,6 +56,14 @@ foreach ($name in @('dvdauthor.exe', 'mkisofs.exe')) {
 }
 & (Join-Path $tools 'ffmpeg.exe') -version | Select-Object -First 1
 & (Join-Path $tools 'yt-dlp.exe') --version
-& (Join-Path $dvdBin 'dvdauthor.exe') -h 2>&1 | Select-Object -First 3
+$previousPreference = $ErrorActionPreference
+try {
+    # dvdauthor prints help to stderr and deliberately returns 1, including on Windows PowerShell.
+    $ErrorActionPreference = 'Continue'
+    $help = & (Join-Path $dvdBin 'dvdauthor.exe') -h 2>&1
+    $helpExit = $LASTEXITCODE
+} finally { $ErrorActionPreference = $previousPreference }
+if ($helpExit -ne 1 -or !($help -match 'DVDAuthor::dvdauthor')) { throw 'Bundled dvdauthor could not start.' }
+$help | Select-Object -First 3 | ForEach-Object { Write-Host "$_" }
 & (Join-Path $dvdBin 'mkisofs.exe') -version
 Write-Host 'Tools ready. No third-party binaries are tracked by Git.'

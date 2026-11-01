@@ -22,12 +22,67 @@ Standalone-player playback and full-disc/dual-layer burns remain untested.
 
 ## Setup and launch
 
+### Pull, build, run
+
+Install the **.NET 8 SDK for Windows x64** once (the runtime alone is not enough).
+In Windows PowerShell or PowerShell 7:
+
+```powershell
+git clone https://github.com/beegul/compressr.git
+cd compressr
+.\Build.ps1
+.\Compressr.exe
+```
+
+You can instead double-click **Compressr.exe directly in the repo folder**.
+If PowerShell blocks local scripts, use
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\Build.ps1` for this invocation.
+Build automatically downloads missing tools using the existing setup script,
+publishes with the .NET 8 SDK and places the complete self-contained app beside
+the source. No separate manual setup command is needed.
+
+For later updates, close Compressr first:
+
+```powershell
+git pull --ff-only
+.\Build.ps1
+.\Compressr.exe
+```
+
+Repeat builds reuse downloaded tools and cached notices. Previously managed
+runtime files are safely replaced; unrecognized or locally edited destination
+files and locked files cause actionable errors before replacement. Do not edit
+the ignored `.compressr-portable.json` ownership record. The repository README
+and source are never replaced by the portable bundle.
+
+Windows 10/11 **x64** only. Allow approximately **1 GB for the runnable folder**
+and several GB for downloads, build output and retained staging/rollback folders
+under ignored `artifacts`. Exact sizes vary with upstream tool versions.
+First build requires internet for tools, SDK restore and license notices;
+cached builds normally need no tool downloads. Launch needs no SDK, installer,
+PATH changes or worktree. Keep runtime DLLs, language folders, `licenses` and
+`tools` alongside the executable. DVD jobs need additional space as described below.
+
 **Already have the personal portable ZIP?** Extract the entire ZIP, then
 double-click **Compressr.exe** inside the Compressr folder. Keep its `tools`,
 runtime DLLs and license notices together. No .NET installation, SDK, command
 or dependency download is needed to run it. Local conversion works offline;
 YouTube still requires internet. Windows 10/11 **x64** is the supported target.
 Use a writable output location and allow several GB of temporary disk space.
+
+**Executable beside the repository source:** double-click `Compressr.exe` at
+the repository root once the portable bundle has been placed there. The adjacent
+DLLs, language folders, `licenses` and `tools` are required; keep them together.
+These local runtime files are ignored by Git, not uploaded with the source.
+To place an existing complete bundle there without an SDK or downloads:
+
+```powershell
+.\scripts\Place-Portable.ps1 -BundleDirectory 'C:\path to portable bundle\Compressr'
+```
+
+Placement checks bundle hashes and all destination collisions before copying,
+preserves the repository README, and adopts identical existing files.
+Only files matching a previous managed hash may be replaced on later builds.
 
 To reproduce the bundle from source, first complete dependency setup below, then:
 
@@ -41,6 +96,8 @@ tools, authoring DLLs and upstream notices into a fresh ignored
 Use `-OutputDirectory 'C:\path with spaces\Compressr'` for a new destination or
 `-SkipZip` for just the folder. Packaging requires the SDK and internet for
 uncached license notices; launching the result requires neither.
+Add `-RepositoryRoot` to also place the finished bundle beside the source, ready
+to launch as `.\Compressr.exe`. Use `.\Build.ps1` for automatic missing-tool setup.
 Tool discovery starts beside the executable, independent of working directory.
 `COMPRESSR_TOOLS`, if explicitly set, still overrides the bundle.
 Settings, previews, downloads and job folders remain per-user in
@@ -190,10 +247,15 @@ burning; writing/finalising and read-back must finish before the app closes.
 ```powershell
 dotnet build .\Compressr.App\Compressr.App.csproj -c Release
 .\scripts\Test.ps1
+.\scripts\Test-Placement.ps1
 .\scripts\Test.ps1 -Integration
 # Optional: supply a video you have permission to download.
 .\scripts\Test.ps1 -Integration -YouTubeUrl 'https://www.youtube.com/watch?v=YOUR_VIDEO'
 ```
+
+Placement checks cover first placement, repeat builds, managed replacement,
+source README preservation, unexpected collisions and locked-file rejection
+using disposable fixtures, without downloads or disc operations.
 
 The dependency-free console test harness checks exact fit boundaries for both
 capacities, invalid inputs, bitrate/mux budget, sample aspect, metadata/manual

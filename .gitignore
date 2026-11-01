@@ -4,3 +4,27 @@ tools/
 artifacts/
 *.user
 *.iso
+# Local self-contained app placed beside the source.
+/*.dll
+/*.pdb
+/Compressr.exe
+/createdump.exe
+/Compressr.deps.json
+/Compressr.runtimeconfig.json
+/START HERE.txt
+/licenses/
+/cs/
+/de/
+/es/
+/fr/
+/it/
+/ja/
+/ko/
+/pl/
+/pt-BR/
+/ru/
+/tr/
+/zh-Hans/
+/zh-Hant/
+/.compressr-portable.json
+/.compressr-placement.lock
