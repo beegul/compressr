@@ -1,0 +1,112 @@
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+using System.Security.Cryptography;
+using Compressr.Core;
+
+namespace Compressr.App;
+
+public sealed record DvdDrive(string Id, string Label, string Mount);
+
+public static class DiscWriter
+{
+    private static dynamic Com(string name) => Activator.CreateInstance(Type.GetTypeFromProgID(name, true)!)!;
+    private static void Release(object? value)
+    {
+        if (value != null && Marshal.IsComObject(value)) Marshal.FinalReleaseComObject(value);
+    }
+
+    public static IReadOnlyList<DvdDrive> GetDrives()
+    {
+        var drives = new List<DvdDrive>();
+        object? masterObject = null;
+        try
+        {
+            dynamic master = masterObject = Com("IMAPI2.MsftDiscMaster2");
+            if (!(bool)master.IsSupportedEnvironment) return drives;
+            for (int i = 0; i < (int)master.Count; i++)
+            {
+                object? recorderObject = null;
+                try
+                {
+                    string id = master[i];
+                    dynamic recorder = recorderObject = Com("IMAPI2.MsftDiscRecorder2");
+                    recorder.InitializeDiscRecorder(id);
+                    var mounts = ((Array)recorder.VolumePathNames).Cast<string>().ToArray();
+                    drives.Add(new(id, $"{recorder.VendorId} {recorder.ProductId} ({string.Join(", ", mounts)})",
+                        mounts.FirstOrDefault() ?? ""));
+                }
+                finally { Release(recorderObject); }
+            }
+            return drives;
+        }
+        finally { Release(masterObject); }
+    }
+
+    public static void CheckBlank(DvdDrive drive, long requiredBytes)
+    {
+        object? recorderObject = null, formatObject = null;
+        try
+        {
+            dynamic recorder = recorderObject = Com("IMAPI2.MsftDiscRecorder2");
+            recorder.InitializeDiscRecorder(drive.Id);
+            dynamic format = formatObject = Com("IMAPI2.MsftDiscFormat2Data");
+            if (!(bool)format.IsRecorderSupported(recorder) || !(bool)format.IsCurrentMediaSupported(recorder))
+                throw new InvalidOperationException("Insert a supported writable DVD in the selected drive.");
+            format.Recorder = recorder;
+            int type = (int)format.CurrentPhysicalMediaType;
+            if (type is not (5 or 6 or 7 or 8 or 9 or 10 or 11 or 13))
+                throw new InvalidOperationException("The inserted medium is not a supported DVD.");
+            if (!(bool)format.MediaHeuristicallyBlank && !(bool)format.MediaPhysicallyBlank)
+                throw new InvalidOperationException("The DVD is not blank. Compressr never erases or overwrites discs.");
+            if ((long)format.FreeSectorsOnMedia * 2048 < requiredBytes)
+                throw new InvalidOperationException("The inserted disc has insufficient free capacity. Choose the correct disc capacity or insert a larger DVD.");
+        }
+        finally { Release(formatObject); Release(recorderObject); }
+    }
+
+    public static void Burn(string iso, DvdDrive drive, IProgress<StageProgress> progress)
+    {
+        CheckBlank(drive, new FileInfo(iso).Length);
+        object? recorderObject = null, formatObject = null;
+        IStream? stream = null;
+        try
+        {
+            dynamic recorder = recorderObject = Com("IMAPI2.MsftDiscRecorder2");
+            recorder.InitializeDiscRecorder(drive.Id);
+            dynamic format = formatObject = Com("IMAPI2.MsftDiscFormat2Data");
+            format.Recorder = recorder;
+            format.ClientName = "Compressr";
+            format.ForceMediaToBeClosed = true;
+            Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(iso, 0x20, 0, false, null, out stream));
+            progress.Report(new("Burn", null, "Writing and finalising the disc. Do not remove it. This stage cannot be cancelled."));
+            format.Write(stream);
+        }
+        finally { Release(stream); Release(formatObject); Release(recorderObject); }
+    }
+
+    public static async Task VerifyAsync(string dvd, DvdDrive drive, IProgress<StageProgress> progress)
+    {
+        progress.Report(new("Verify", null, "Waiting for the finalised disc to mount…"));
+        string target = Path.Combine(drive.Mount, "VIDEO_TS");
+        for (int i = 0; i < 30 && !Directory.Exists(target); i++) await Task.Delay(1000);
+        if (drive.Mount.Length == 0 || !Directory.Exists(target))
+            throw new IOException("Burn completed, but Windows did not mount the disc for verification. The disc is not verified.");
+        var files = Directory.GetFiles(Path.Combine(dvd, "VIDEO_TS"));
+        for (int i = 0; i < files.Length; i++)
+        {
+            progress.Report(new("Verify", (double)i / files.Length, $"Reading back {Path.GetFileName(files[i])}…"));
+            await using var original = File.OpenRead(files[i]);
+            await using var burned = File.OpenRead(Path.Combine(target, Path.GetFileName(files[i])));
+            byte[] originalHash = await SHA256.HashDataAsync(original);
+            byte[] burnedHash = await SHA256.HashDataAsync(burned);
+            if (original.Length != burned.Length ||
+                !CryptographicOperations.FixedTimeEquals(originalHash, burnedHash))
+                throw new IOException($"Read-back verification failed for {Path.GetFileName(files[i])}. Do not rely on this disc.");
+        }
+    }
+
+    [DllImport("shlwapi.dll", CharSet = CharSet.Unicode, PreserveSig = true)]
+    private static extern int SHCreateStreamOnFileEx(string path, uint mode, uint attributes,
+        [MarshalAs(UnmanagedType.Bool)] bool create, IStream? template, out IStream stream);
+}
