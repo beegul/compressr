@@ -8,6 +8,7 @@ using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Media;
+using System.Windows.Threading;
 using Compressr.Core;
 using Microsoft.Win32;
 
@@ -25,6 +26,14 @@ public partial class MainWindow : Window
     private bool updatingDrives;
     private readonly DvdOutputSelection outputSelection = new();
     private DiscReadiness readiness = DiscReadiness.NoWriter;
+    private DiscInspection? currentInspection;
+    private readonly SemaphoreSlim readinessGate = new(1);
+    private string? preferredDriveId;
+    private readonly DispatcherTimer mediaTimer = new() { Interval = TimeSpan.FromSeconds(5) };
+    private CancellationTokenSource? estimateCancellation;
+    private Task? estimateRefresh;
+    private bool closed;
+    private readonly Dictionary<string, (long Length, DateTime Modified, VideoInfo Info)> probeCache = new(StringComparer.OrdinalIgnoreCase);
     private string isoDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Compressr.iso");
     private string folderDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}");
     private sealed record PreparedJob(string Path, string Status)
@@ -37,6 +46,8 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<SourceVideo> videos = [];
     private readonly SemaphoreSlim titleSlots = new(2);
     private readonly Func<string, CancellationToken, Task<YouTubeInfo>> metadataLookup;
+    private readonly Func<IReadOnlyList<DvdDrive>> enumerateDrives;
+    private readonly Func<DvdDrive, DiscInspection> inspectDisc;
     private readonly List<string> previewFiles = [];
     private Point dragOrigin;
     private SourceVideo? draggedVideo;
@@ -48,16 +59,26 @@ public partial class MainWindow : Window
     internal MainWindow(string stateDirectory) : this(stateDirectory, null) { }
 
     internal MainWindow(string stateDirectory, Func<string, CancellationToken, Task<YouTubeInfo>>? metadataLookup)
+        : this(stateDirectory, metadataLookup, DiscWriter.GetDrives, DiscWriter.InspectPreparation) { }
+
+    internal MainWindow(string stateDirectory, Func<string, CancellationToken, Task<YouTubeInfo>>? metadataLookup,
+        Func<IReadOnlyList<DvdDrive>> enumerateDrives, Func<DvdDrive, DiscInspection> inspectDisc)
     {
         this.stateDirectory = stateDirectory;
         this.metadataLookup = metadataLookup ?? LookupMetadataAsync;
+        this.enumerateDrives = enumerateDrives;
+        this.inspectDisc = inspectDisc;
         InitializeComponent();
         Inputs.ItemsSource = videos;
-        videos.CollectionChanged += (_, _) => QueueSummary.Text = videos.Count switch
+        videos.CollectionChanged += (_, _) =>
         {
-            0 => "Play order",
-            1 => "1 video · plays in full",
-            _ => $"{videos.Count} videos · play in this order"
+            QueueSummary.Text = videos.Count switch
+            {
+                0 => "Play order",
+                1 => "1 video · plays in full",
+                _ => $"{videos.Count} videos · play in this order"
+            };
+            ScheduleEstimate();
         };
         Standard.ItemsSource = Enum.GetValues<TelevisionSystem>();
         Capacity.ItemsSource = Enum.GetValues<DiscSize>();
@@ -82,7 +103,9 @@ public partial class MainWindow : Window
         initialized = true;
         LoadPreparedJobs();
         UpdateOutput();
-        Loaded += async (_, _) => await RefreshReadinessAsync(true);
+        ScheduleEstimate();
+        mediaTimer.Tick += async (_, _) => await RefreshReadinessAsync(true);
+        Loaded += async (_, _) => { mediaTimer.Start(); await RefreshReadinessAsync(true); };
     }
 
     private MediaTools Tools()
@@ -115,52 +138,50 @@ public partial class MainWindow : Window
         try { File.WriteAllText(Path.Combine(stateDirectory, "settings.json"), JsonSerializer.Serialize((TelevisionSystem)Standard.SelectedItem)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Status.Text = $"Could not save TV standard: {ex.Message}"; }
         Preview.Source = null;
-        Estimate.Text = "TV standard changed. Check fit to refresh estimates.";
+        ScheduleEstimate();
     }
-    private long RequiredBurnBytes() => DvdPlan.DiscCapacity((DiscSize)Capacity.SelectedItem) / 2048 * 2048;
-
-    private async void RefreshDrives(object sender, RoutedEventArgs e) => await RefreshReadinessAsync(true);
-    private async void CheckDisc(object sender, RoutedEventArgs e) => await RefreshReadinessAsync(false);
     private async void DriveChanged(object sender, SelectionChangedEventArgs e)
-    { if (initialized && !updatingDrives) await RefreshReadinessAsync(false); }
-    private async void CapacityChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!initialized || updatingDrives) return;
+        preferredDriveId = (Drives.SelectedItem as DvdDrive)?.Id;
+        await RefreshReadinessAsync(true);
+    }
+    private void CapacityChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!initialized) return;
-        Estimate.Text = "Capacity changed. Check fit before preparing.";
-        await RefreshReadinessAsync(false);
+        ScheduleEstimate();
     }
-    private async Task RefreshReadinessAsync(bool enumerate)
+    private async Task RefreshReadinessAsync(bool enumerate, bool forAction = false)
     {
-        if (cancellation != null) return;
-        cancellation = new(); Busy(true);
+        if (closed || (cancellation != null && !forAction)) return;
+        if (forAction) await readinessGate.WaitAsync(cancellation?.Token ?? CancellationToken.None);
+        else if (!await readinessGate.WaitAsync(0)) return;
+        try { await RefreshReadinessCoreAsync(enumerate); }
+        finally { readinessGate.Release(); }
+    }
+    private async Task RefreshReadinessCoreAsync(bool enumerate)
+    {
         try
         {
-            Stage.Text = "Checking disc (read only)";
-            long required = RequiredBurnBytes();
             DvdDrive? selected = Drives.SelectedItem as DvdDrive;
             IReadOnlyList<DvdDrive> drives = [];
             var results = new Dictionary<string, DiscReadiness>();
             var inspections = new Dictionary<string, DiscInspection>();
             await RunStaAsync(() =>
             {
-                drives = enumerate ? DiscWriter.GetDrives() : selected == null ? [] : [selected];
+                drives = enumerate ? enumerateDrives() : selected == null ? [] : [selected];
                 foreach (var drive in drives)
                 {
                     try
                     {
-                        var inspection = DiscWriter.InspectPreparation(drive);
+                        var inspection = inspectDisc(drive);
                         inspections[drive.Id] = inspection;
-                        results[drive.Id] = DiscReadiness.Assess(inspection.Media, required);
-                        if (!results[drive.Id].Ready && inspection.NeedsErase)
-                        {
-                            inspection.CheckForPreparation(required);
-                            results[drive.Id] = new(false, $"{inspection.Media.Name}: preparation required. Erasing removes all contents and needs separate confirmation. Automatic will not erase.");
-                        }
+                        results[drive.Id] = DiscReadiness.Assess(inspection, 2048);
                     }
                     catch (Exception ex) { results[drive.Id] = DiscReadiness.Failed($"{drive.Label}: {ex.Message}"); }
                 }
             });
-            cancellation.Token.ThrowIfCancellationRequested();
+            if (closed) return;
             if (enumerate)
             {
                 updatingDrives = true;
@@ -168,61 +189,52 @@ public partial class MainWindow : Window
                 {
                     Drives.ItemsSource = drives;
                     var previous = drives.FirstOrDefault(d => d.Id == selected?.Id);
-                    Drives.SelectedItem = !outputSelection.IsManual
-                        ? drives.FirstOrDefault(d => results[d.Id].Ready) ?? previous ?? drives.FirstOrDefault()
-                        : previous ?? drives.FirstOrDefault(d => results[d.Id].Ready) ?? drives.FirstOrDefault();
+                    var preferred = drives.FirstOrDefault(d => d.Id == preferredDriveId);
+                    Drives.SelectedItem = preferred ?? (!outputSelection.IsManual
+                        ? drives.FirstOrDefault(d => results[d.Id].Ready) ?? previous ??
+                            drives.FirstOrDefault(d => results[d.Id].NeedsPreparation) ?? drives.FirstOrDefault()
+                        : previous ?? drives.FirstOrDefault(d => results[d.Id].Ready) ?? drives.FirstOrDefault());
                 }
                 finally { updatingDrives = false; }
             }
             selected = Drives.SelectedItem as DvdDrive;
-            readiness = selected != null && results.TryGetValue(selected.Id, out var result) ? result : DiscReadiness.NoWriter;
-            DiscStatus.Text = readiness.Detail;
-            SetPreparationAvailable(selected != null && inspections.TryGetValue(selected.Id, out var current) ? current : null);
-            outputSelection.Apply(readiness);
-            UpdateOutput();
-            Stage.Text = "Disc checked (not written)";
-            Status.Text = readiness.Detail;
+            var result = selected != null && results.TryGetValue(selected.Id, out var found) ? found : DiscReadiness.NoWriter;
+            var current = selected != null && inspections.TryGetValue(selected.Id, out var inspected) ? inspected : null;
             var otherErrors = results.Where(r => r.Key != selected?.Id && r.Value.Detail.StartsWith("Disc detection failed:", StringComparison.Ordinal))
                 .Select(r => r.Value.Detail);
-            if (otherErrors.Any()) Status.Text += "\n" + string.Join("\n", otherErrors);
+            ApplyInspection(current, otherErrors.Any() ? result with { Detail = result.Detail + "\n" + string.Join("\n", otherErrors) } : result);
         }
-        catch (OperationCanceledException) { Stage.Text = "Cancelled"; }
         catch (Exception ex)
         {
-            readiness = DiscReadiness.Failed(ex.Message);
-            SetPreparationAvailable(null);
-            DiscStatus.Text = readiness.Detail;
-            outputSelection.Apply(readiness); UpdateOutput();
-            Stage.Text = "Disc check failed"; Status.Text = readiness.Detail;
+            if (!closed) ApplyInspection(null, DiscReadiness.Failed(ex.Message));
         }
-        finally { cancellation.Dispose(); cancellation = null; Progress.IsIndeterminate = false; Busy(false); }
+    }
+    private void ApplyInspection(DiscInspection? inspection, DiscReadiness result)
+    {
+        bool changed = currentInspection != inspection || readiness != result;
+        currentInspection = inspection;
+        readiness = result;
+        DiscStatus.Text = readiness.Detail;
+        outputSelection.Apply(readiness);
+        UpdateOutput();
+        if (changed) ScheduleEstimate();
     }
     private void OutputChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!initialized || updatingOutput) return;
         outputSelection.Choose(Output.SelectedIndex switch { 1 => OutputKind.Folder, 2 => OutputKind.Burn, _ => OutputKind.Iso });
         UpdateOutput();
+        ScheduleEstimate();
     }
     private void UseAutomaticOutput(object sender, RoutedEventArgs e)
     {
         outputSelection.UseAutomatic(readiness);
         UpdateOutput();
+        ScheduleEstimate();
     }
-    private void SetPreparationAvailable(DiscInspection? inspection)
-    {
-        bool available = false;
-        if (inspection?.NeedsErase == true)
-        {
-            try { inspection.CheckForPreparation(2048); available = true; }
-            catch (Exception ex) when (ex is InvalidOperationException or InvalidDataException or OverflowException)
-            { System.Diagnostics.Trace.TraceInformation($"Disc preparation unavailable: {ex.Message}"); }
-        }
-        SourcePrepareDiscButton.IsEnabled = PrepareDiscButton.IsEnabled = available;
-    }
-
     private async Task<bool> PreflightDiscAsync(DvdDrive? drive, long requiredBytes, CancellationToken token)
     {
-        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer and refresh, or explicitly choose Save DVD-ready ISO.");
+        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, or explicitly choose Save DVD-ready ISO.");
         Stage.Text = "Disc preflight";
         Status.Text = $"Checking {drive.Label}: media type, state and capacity. No disc is written or erased by this check.";
         DiscInspection? latest = null;
@@ -232,7 +244,7 @@ public partial class MainWindow : Window
             result = await discPreparation.RunAsync(requiredBytes, async ct =>
             {
                 ct.ThrowIfCancellationRequested();
-                await RunStaAsync(() => latest = DiscWriter.InspectPreparation(drive));
+                await RunStaAsync(() => latest = inspectDisc(drive));
                 return latest ?? throw new InvalidOperationException("The writer returned no disc inspection.");
             }, inspection =>
             {
@@ -252,7 +264,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            readiness = DiscReadiness.Failed(ex.Message); DiscStatus.Text = readiness.Detail; SetPreparationAvailable(null);
+            ApplyInspection(null, DiscReadiness.Failed(ex.Message));
             throw;
         }
         finally { erasing = false; Progress.IsIndeterminate = false; CancelButton.IsEnabled = !burning; }
@@ -267,35 +279,12 @@ public partial class MainWindow : Window
         DiscStatus.Text = result == DiscPreparationResult.ErasedAndReady
             ? $"Prepared and checked: {checkedDisc.Media.Summary}. Burning still requires confirmation."
             : $"Preflight passed: {checkedDisc.Media.Summary}. No formatting or erasure needed.";
-        SetPreparationAvailable(checkedDisc);
+        currentInspection = checkedDisc;
         Stage.Text = "Disc ready";
         Status.Text = DiscStatus.Text;
         return true;
     }
 
-    private async void PrepareDisc(object sender, RoutedEventArgs e)
-    {
-        if (cancellation != null) return;
-        cancellation = new(); Busy(true);
-        try
-        {
-            long required = RequiredBurnBytes();
-            if (WorkspaceTabs.SelectedIndex == 1 && PreparedJobs.SelectedItem is PreparedJob job)
-            {
-                using var dvd = await PreparedDvd.OpenAsync(job.Path, Reporter(), cancellation.Token);
-                required = dvd.Length;
-                await PreflightDiscAsync(Drives.SelectedItem as DvdDrive, required, cancellation.Token);
-            }
-            else await PreflightDiscAsync(Drives.SelectedItem as DvdDrive, required, cancellation.Token);
-        }
-        catch (OperationCanceledException) { Stage.Text = "Preparation cancelled"; Status.Text = "Cancelled before erasure. No DVD was burned."; }
-        catch (Exception ex)
-        {
-            readiness = DiscReadiness.Failed(ex.Message); DiscStatus.Text = readiness.Detail; SetPreparationAvailable(null);
-            Stage.Text = "Disc not ready"; Status.Text = $"Disc preparation did not verify readiness: {ex.Message}\nNo DVD was burned. Check the disc before trying again.";
-        }
-        finally { cancellation.Dispose(); cancellation = null; erasing = false; Progress.IsIndeterminate = false; Busy(false); }
-    }
     private void UpdateOutput()
     {
         updatingOutput = true;
@@ -304,13 +293,13 @@ public partial class MainWindow : Window
         SaveOptions.Visibility = outputSelection.Selected == OutputKind.Burn ? Visibility.Collapsed : Visibility.Visible;
         SavePath.Text = outputSelection.Selected == OutputKind.Folder ? folderDestination : isoDestination;
         OutputChoiceHint.Text = outputSelection.IsManual ? "Your choice is kept until you use automatic." :
-            "Automatic: burn if a suitable blank DVD is ready; otherwise save an ISO.";
+            "Automatic: use a blank or safely erasable DVD; otherwise save an ISO. Erasure always asks permission.";
         UpdatePrimaryAction();
     }
     private void WorkspaceChanged(object sender, SelectionChangedEventArgs e)
     { if (initialized && ReferenceEquals(e.Source, WorkspaceTabs)) UpdatePrimaryAction(); }
     private void UpdatePrimaryAction() => StartButton.Content = WorkspaceTabs.SelectedIndex == 1 ? "_Burn selected DVD…" :
-        outputSelection.Selected == OutputKind.Burn ? "_Prepare and burn…" : "_Prepare DVD";
+        "_Make DVD";
     private bool SelectDestination()
     {
         if (outputSelection.Selected == OutputKind.Folder)
@@ -442,13 +431,12 @@ public partial class MainWindow : Window
             foreach (string file in dialog.FileNames) AddVideo(file);
     }
     private void SourceChanged(object sender, TextChangedEventArgs e)
-    { if (initialized && Source.Text.Length > 0) Estimate.Text = "Input changed. Add it, then Check fit for the combined duration."; }
+    { if (initialized && Source.Text.Length > 0) Status.Text = "Click Add or Make DVD to include the typed source in DVD usage."; }
     private void AddVideo(string input)
     {
         var item = new SourceVideo(input);
         videos.Add(item);
         Inputs.SelectedIndex = videos.Count - 1;
-        Estimate.Text = "List changed. Check fit before making the DVD.";
         if (!item.IsLocal) _ = LoadTitleAsync(item);
     }
     private async Task<YouTubeInfo> LookupMetadataAsync(string input, CancellationToken token)
@@ -464,7 +452,7 @@ public partial class MainWindow : Window
         try { await pending; }
         catch (OperationCanceledException) { /* The queue row reports cancellation or timeout. */ }
         catch (Exception) { /* The queue row retains the lookup error and original URL. */ }
-        finally { UpdateCancelButton(); }
+        finally { UpdateCancelButton(); if (videos.Contains(item)) ScheduleEstimate(); }
     }
     private async void RetryTitle(object sender, RoutedEventArgs e)
     {
@@ -508,7 +496,6 @@ public partial class MainWindow : Window
         Inputs.SelectedItem = item;
         Inputs.ScrollIntoView(item);
         if (Inputs.ItemContainerGenerator.ContainerFromItem(item) is ListBoxItem container) container.Focus();
-        Estimate.Text = "Play order changed. Check fit before making the DVD.";
     }
     private void QueueKeyDown(object sender, KeyEventArgs e)
     {
@@ -571,7 +558,6 @@ public partial class MainWindow : Window
         if (index < 0) return;
         videos[index].CancelTitle();
         videos.RemoveAt(index); Inputs.SelectedIndex = Math.Min(index, videos.Count - 1);
-        Estimate.Text = "List changed. Check fit for the updated duration.";
     }
     private IReadOnlyList<string> DroppedSources(IDataObject data)
     {
@@ -667,39 +653,124 @@ public partial class MainWindow : Window
         item.CachedSource = await tools.DownloadAsync(input, Path.Combine(stateDirectory, "downloads", Guid.NewGuid().ToString("N")), progress, token);
         return item.CachedSource;
     }
-    private async Task<VideoInfo> EstimateAsync(MediaTools tools, CancellationToken token)
+    private long? AvailableCapacityBytes() => outputSelection.Selected == OutputKind.Burn && currentInspection != null &&
+        (readiness.Ready || readiness.NeedsPreparation)
+        ? currentInspection.NeedsErase ? checked(currentInspection.Media.TotalSectors * 2048) : currentInspection.Media.AvailableBytes
+        : null;
+
+    private void ScheduleEstimate()
+    {
+        if (!initialized || closed) return;
+        estimateCancellation?.Cancel();
+        if (cancellation != null) return;
+        var pending = new CancellationTokenSource();
+        estimateCancellation = pending;
+        var sources = videos.ToArray();
+        var system = (TelevisionSystem)Standard.SelectedItem;
+        var size = (DiscSize)Capacity.SelectedItem;
+        long? available = AvailableCapacityBytes();
+        CapacityMeter.Value = 0;
+        CapacityMeter.IsIndeterminate = sources.Length > 0;
+        CapacitySummary.Text = sources.Length == 0 ? "Add videos to estimate DVD usage." : "Estimating DVD usage…";
+        Estimate.Text = sources.Length == 0 ? "Updates automatically. Uses encoded DVD size, not source file size." :
+            "Reading duration only. No video is downloaded.";
+        estimateRefresh = RefreshEstimateAsync(sources, system, size, available, pending);
+    }
+
+    private async Task RefreshEstimateAsync(SourceVideo[] sources, TelevisionSystem system, DiscSize size,
+        long? available, CancellationTokenSource pending)
+    {
+        try
+        {
+            if (sources.Length == 0) return;
+            await Task.Delay(400, pending.Token);
+            var combined = await EstimateAsync(Tools(), sources, pending.Token, false);
+            pending.Token.ThrowIfCancellationRequested();
+            if (!ReferenceEquals(estimateCancellation, pending) || closed) return;
+            ShowCapacity(combined, system, size, available);
+        }
+        catch (OperationCanceledException)
+        {
+            if (ReferenceEquals(estimateCancellation, pending) && !closed)
+            {
+                CapacitySummary.Text = "DVD usage estimate cancelled.";
+                Estimate.Text = "Change the source list or retry an unavailable title to estimate again.";
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ReferenceEquals(estimateCancellation, pending) && !closed)
+            {
+                CapacitySummary.Text = "DVD usage unknown.";
+                Estimate.Text = $"Could not read every duration: {ex.Message}";
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(estimateCancellation, pending))
+            { CapacityMeter.IsIndeterminate = false; estimateCancellation = null; }
+            pending.Dispose();
+        }
+    }
+
+    private void ShowCapacity(VideoInfo info, TelevisionSystem system, DiscSize size, long? available)
+    {
+        var estimate = DvdCapacityEstimate.Create(info, system, size, available);
+        CapacityMeter.IsIndeterminate = false;
+        CapacityMeter.Value = Math.Clamp(estimate.Percent, 0, 100);
+        CapacityMeter.Foreground = (Brush)FindResource(estimate.Fits ? "Accent" : "Ink");
+        CapacitySummary.Text = estimate.Fits
+            ? $"About {estimate.Percent:F0}% · {estimate.EstimatedBytes / 1_000_000_000:F2} / {estimate.Capacity / 1_000_000_000.0:F2} GB"
+            : $"Too long · needs at least {estimate.MinimumBytes / 1_000_000_000:F2} GB plus safety reserve";
+        string target = available != null ? "Uses the smaller of selected capacity and actual disc capacity." : "Uses the selected disc capacity.";
+        Estimate.Text = estimate.Fits
+            ? $"{info.Duration / 60:F1} minutes · {estimate.VideoBitrate / 1_000_000.0:F2} Mbps video{(estimate.HalfD1 ? " · half-D1" : "")}.\n" +
+              $"Estimated authored size with audio / overhead; not source bytes. Auto-fit adjusts quality, so longer DVDs can stay near 95% full. {target}"
+            : $"{info.Duration / 60:F1} minutes exceeds the 2 Mbps quality floor. Choose a larger disc or remove videos. Nothing has been encoded. {target}";
+    }
+
+    private async Task<VideoInfo> EstimateAsync(MediaTools tools, IReadOnlyList<SourceVideo> sources,
+        CancellationToken token, bool retryMetadata = true)
     {
         var clips = new List<VideoClip>();
-        foreach (var item in videos)
+        foreach (var item in sources)
         {
-            Stage.Text = "Inspect"; Status.Text = $"Checking {item.Label} (no YouTube download)…";
             VideoInfo info;
             string source = item.CachedSource != null && File.Exists(item.CachedSource) ? item.CachedSource : item.Input;
-            if (File.Exists(source)) info = await tools.ProbeAsync(source, token);
+            if (item.IsLocal || File.Exists(source))
+            {
+                var file = new FileInfo(source);
+                if (!file.Exists) throw new FileNotFoundException($"Source unavailable: {item.Label}", source);
+                if (probeCache.TryGetValue(source, out var cached) && cached.Length == file.Length && cached.Modified == file.LastWriteTimeUtc)
+                    info = cached.Info;
+                else
+                {
+                    using var bounded = CancellationTokenSource.CreateLinkedTokenSource(token);
+                    bounded.CancelAfter(TimeSpan.FromSeconds(45));
+                    try { info = await tools.ProbeAsync(source, bounded.Token); }
+                    catch (OperationCanceledException) when (!token.IsCancellationRequested)
+                    { throw new TimeoutException($"Duration lookup timed out for {item.Label}."); }
+                    token.ThrowIfCancellationRequested();
+                    probeCache[source] = (file.Length, file.LastWriteTimeUtc, info);
+                }
+            }
             else
             {
+                if (!retryMetadata && item.Metadata == null && !item.IsResolvingTitle && item.TitleStatus.Length > 0)
+                    throw new InvalidOperationException($"{item.Label}: {item.TitleStatus}");
                 var metadata = await item.MetadataAsync(metadataLookup, token);
                 info = new(metadata.Duration, 1920, 1080, 1, 0, true);
             }
             clips.Add(new(item.Input, info, item.Rotation));
         }
-        var combined = VideoPlaylist.Combined(clips);
-        Estimate.Text = VideoPlaylist.FitEstimate(combined, (TelevisionSystem)Standard.SelectedItem);
-        return combined;
-    }
-    private async void CheckFit(object sender, RoutedEventArgs e)
-    {
-        if (cancellation != null || !AddPending()) return;
-        cancellation = new(); Busy(true);
-        try { await EstimateAsync(Tools(), cancellation.Token); Stage.Text = "Fit checked"; Status.Text = Estimate.Text; }
-        catch (OperationCanceledException) { Stage.Text = "Cancelled"; }
-        catch (Exception ex) { Stage.Text = "Fit check failed"; Estimate.Text = "Fit is unknown."; Status.Text = ex.Message; }
-        finally { cancellation.Dispose(); cancellation = null; Busy(false); }
+        return VideoPlaylist.Combined(clips);
     }
     private void Busy(bool value)
     {
         Options.IsEnabled = !value; BurnOptions.IsEnabled = !value;
         StartButton.IsEnabled = !value;
+        if (value) estimateCancellation?.Cancel();
+        else ScheduleEstimate();
         CancelButton.IsEnabled = !burning && !erasing && (value || videos.Any(v => v.IsResolvingTitle));
     }
     private void UpdateCancelButton() =>
@@ -742,34 +813,35 @@ public partial class MainWindow : Window
     {
         if (WorkspaceTabs.SelectedIndex == 1) { BurnPrepared(sender, e); return; }
         if (cancellation != null || !AddPending()) return;
-        OutputKind output = outputSelection.Selected;
-        DvdDrive? drive = Drives.SelectedItem as DvdDrive;
-        string destination;
-        long? originalLength;
-        DateTime? originalModified;
-        try
-        {
-            if (output == OutputKind.Iso && File.Exists(isoDestination) && !SelectDestination()) return;
-            destination = output == OutputKind.Folder ? folderDestination : isoDestination;
-            var existing = output == OutputKind.Iso && File.Exists(destination) ? new FileInfo(destination) : null;
-            originalLength = existing?.Length;
-            originalModified = existing?.LastWriteTimeUtc;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or Win32Exception)
-        { Stage.Text = "Save location unavailable"; Status.Text = $"Could not use the DVD save location: {ex.Message}"; return; }
         cancellation = new(); Busy(true);
+        OutputKind output = outputSelection.Selected;
+        string destination = isoDestination;
         string work = Path.Combine(stateDirectory, "jobs", Guid.NewGuid().ToString("N"));
-        if (output == OutputKind.Burn) destination = Path.Combine(work, "prepared.iso");
         string? partialIso = null;
         try
         {
             var token = cancellation.Token; var reporter = Reporter(); var tools = Tools();
-            var estimate = await EstimateAsync(tools, token);
-            _ = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
+            Stage.Text = "Making DVD · checking sources and disc";
+            await RefreshReadinessAsync(true, true);
+            token.ThrowIfCancellationRequested();
+            if (!outputSelection.IsManual && readiness.DetectionFailed)
+                throw new IOException(readiness.Detail + " Nothing was started. Choose file output explicitly to save without a disc.");
+            output = outputSelection.Selected;
+            DvdDrive? drive = Drives.SelectedItem as DvdDrive;
+            if (output == OutputKind.Iso && File.Exists(isoDestination) && !SelectDestination()) return;
+            destination = output == OutputKind.Burn ? Path.Combine(work, "prepared.iso") :
+                output == OutputKind.Folder ? folderDestination : isoDestination;
+            var existing = output == OutputKind.Iso && File.Exists(destination) ? new FileInfo(destination) : null;
+            long? originalLength = existing?.Length;
+            DateTime? originalModified = existing?.LastWriteTimeUtc;
+            var estimate = await EstimateAsync(tools, videos.ToArray(), token);
+            long? available = AvailableCapacityBytes();
+            var estimatedPlan = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0, available);
+            ShowCapacity(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, available);
             if (output == OutputKind.Burn)
             {
-                if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer and refresh, or explicitly choose Save DVD-ready ISO.");
-                if (!await PreflightDiscAsync(drive, RequiredBurnBytes(), token)) return;
+                if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, or explicitly choose Save DVD-ready ISO.");
+                if (!await PreflightDiscAsync(drive, estimatedPlan.Capacity / 2048 * 2048, token)) return;
                 token.ThrowIfCancellationRequested();
             }
             if (output == OutputKind.Folder && Directory.Exists(destination))
@@ -782,8 +854,8 @@ public partial class MainWindow : Window
             }
             Stage.Text = "Inspect"; Status.Text = "Checking duration, orientation and disc fit…";
             var info = VideoPlaylist.Combined(clips);
-            Estimate.Text = VideoPlaylist.FitEstimate(info, (TelevisionSystem)Standard.SelectedItem);
-            var plan = DvdPlan.Create(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
+            ShowCapacity(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, available);
+            var plan = DvdPlan.Create(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0, available);
             var dvd = await new DvdPipeline(tools).AuthorPlaylistAsync(clips, plan, work, reporter, token);
             if (output == OutputKind.Folder)
             {
@@ -858,6 +930,8 @@ public partial class MainWindow : Window
         cancellation = new(); Busy(true);
         try
         {
+            await RefreshReadinessAsync(true, true);
+            cancellation.Token.ThrowIfCancellationRequested();
             await BurnIsoAsync(job.Path, Drives.SelectedItem as DvdDrive, cancellation.Token);
         }
         catch (OperationCanceledException) { Stage.Text = "Cancelled"; Status.Text = "No disc was written. The prepared ISO is unchanged."; SetPreparedStatus(job.Path, "Cancelled · not written"); }
@@ -874,7 +948,7 @@ public partial class MainWindow : Window
         SetPreparedStatus(path, "Checking ISO and disc…");
         using var prepared = await PreparedDvd.OpenAsync(path, reporter, token);
         token.ThrowIfCancellationRequested();
-        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, refresh, then select this ISO again. The saved ISO is unchanged.");
+        if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, then select this ISO again. The saved ISO is unchanged.");
         if (!await PreflightDiscAsync(drive, prepared.Length, token))
         { SetPreparedStatus(path, "Preparation declined · not written"); return; }
         token.ThrowIfCancellationRequested();
@@ -892,24 +966,29 @@ public partial class MainWindow : Window
         Stage.Text = "Done"; Progress.Value = 100;
         Status.Text = "One DVD burned, finalised and verified by SHA-256 read-back. Insert a new blank disc, then select another prepared ISO to repeat.";
         SetPreparedStatus(path, "Burned and verified this run");
-        readiness = new(false, "Disc has been written. Insert a new blank DVD and check disc before the next job.");
+        readiness = new(false, "Disc has been written. Insert a new blank DVD; the next job checks it automatically.");
         DiscStatus.Text = readiness.Detail;
     }
     private static Task RunStaAsync(Action action)
     {
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var thread = new Thread(() => { try { action(); completion.SetResult(); } catch (Exception ex) { completion.SetException(ex); } });
+        thread.IsBackground = true;
         thread.SetApartmentState(ApartmentState.STA); thread.Start(); return completion.Task;
     }
     private void Cancel(object sender, RoutedEventArgs e)
     {
         if (burning || erasing) return;
         cancellation?.Cancel();
+        estimateCancellation?.Cancel();
         foreach (var item in videos) item.CancelTitle();
     }
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (cancellation != null) { e.Cancel = true; Status.Text = erasing ? "Wait until disc erasure and readiness verification finish." : burning ? "Wait until disc writing and verification finish." : "Cancel the current operation before closing."; return; }
+        closed = true;
+        mediaTimer.Stop();
+        estimateCancellation?.Cancel();
         foreach (var item in videos) item.CancelTitle();
         foreach (string file in previewFiles)
         {

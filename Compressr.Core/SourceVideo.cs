@@ -49,12 +49,12 @@ public sealed class SourceVideo(string input) : INotifyPropertyChanged
         }
         catch (OperationCanceledException)
         {
-            TitleStatus = "Title lookup cancelled or timed out. Retry title or Check fit.";
+            TitleStatus = "Title lookup cancelled or timed out. Use Retry title.";
             throw;
         }
         catch (Exception ex)
         {
-            TitleStatus = $"Title unavailable: {ex.Message} Retry title or Check fit.";
+            TitleStatus = $"Title unavailable: {ex.Message} Use Retry title.";
             throw;
         }
         finally

@@ -20,14 +20,15 @@ public sealed record DvdPlan(TelevisionSystem System, long Capacity, int VideoBi
     public const int MinimumBitrate = 2_000_000;
     public static long DiscCapacity(DiscSize size) => size == DiscSize.SingleLayer ? 4_700_000_000L : 8_547_991_552L;
 
-    public static DvdPlan Create(VideoInfo video, TelevisionSystem system, DiscSize size, int rotation)
+    public static DvdPlan Create(VideoInfo video, TelevisionSystem system, DiscSize size, int rotation, long? availableBytes = null)
     {
         if (!Enum.IsDefined(system) || !Enum.IsDefined(size) || rotation % 90 != 0)
             throw new ArgumentException("Choose PAL/NTSC, a supported disc capacity and quarter-turn rotation.");
         if (!double.IsFinite(video.Duration) || video.Duration <= 0 ||
             video.Width <= 0 || video.Height <= 0 || !double.IsFinite(video.PixelAspect) || video.PixelAspect <= 0)
             throw new ArgumentException("The video has no valid duration or dimensions.");
-        long capacity = DiscCapacity(size);
+        if (availableBytes is <= 0) throw new ArgumentOutOfRangeException(nameof(availableBytes));
+        long capacity = Math.Min(DiscCapacity(size), availableBytes ?? long.MaxValue);
         double available = capacity * .95 - 32 * 1024 * 1024;
         double budget = available * 8 / video.Duration / 1.04 - AudioBitrate;
         if (budget < MinimumBitrate)
@@ -62,5 +63,27 @@ public sealed record DvdPlan(TelevisionSystem System, long Capacity, int VideoBi
             $"scale={canvasWidth}:576:force_original_aspect_ratio=decrease:force_divisible_by=2," +
             $"pad={canvasWidth}:576:(ow-iw)/2:(oh-ih)/2:black,scale={Width}:{Height},setsar={sar}";
         return preview ? filter + $",scale={canvasWidth}:576,setsar=1" : filter;
+    }
+}
+
+public sealed record DvdCapacityEstimate(double Duration, long Capacity, double EstimatedBytes,
+    double MinimumBytes, int VideoBitrate, bool Fits, bool HalfD1)
+{
+    public double Percent => EstimatedBytes / Capacity * 100;
+    public static DvdCapacityEstimate Create(VideoInfo video, TelevisionSystem system, DiscSize size, long? availableBytes = null)
+    {
+        long capacity = Math.Min(DvdPlan.DiscCapacity(size), availableBytes ?? long.MaxValue);
+        double Size(int bitrate) => (bitrate + DvdPlan.AudioBitrate) * video.Duration / 8 * 1.04 + 32 * 1024 * 1024;
+        try
+        {
+            var plan = DvdPlan.Create(video, system, size, 0, availableBytes);
+            return new(video.Duration, capacity, Size(plan.VideoBitrate), Size(DvdPlan.MinimumBitrate),
+                plan.VideoBitrate, true, plan.Width == 352);
+        }
+        catch (InvalidOperationException)
+        {
+            return new(video.Duration, capacity, Size(DvdPlan.MinimumBitrate), Size(DvdPlan.MinimumBitrate),
+                DvdPlan.MinimumBitrate, false, true);
+        }
     }
 }

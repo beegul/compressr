@@ -5,15 +5,16 @@ and permitted YouTube videos into one continuous autoplay DVD-Video, without a s
 HandBrake step or codec settings. Includes a local personal portable packaging
 command, not an installer or signed public release.
 
-The main window follows **your videos → your DVD → Prepare DVD**. Browse or
+The main window follows **your videos → your DVD → Make DVD**. Browse or
 drop one or several files, or add a permitted YouTube link; the queue is the
 playback order. Orientation preview and rotation stay beside the queue. The DVD
-panel contains PAL/NTSC, 4.7/8.5 GB capacity, ISO/folder output and Check fit.
-**Burn prepared DVDs** is a separate tab for saved ISOs, the writer and Check disc.
-The output starts on **Prepare and burn DVD** only when a read-only startup check
-finds a compatible blank DVD large enough for the selected capacity; otherwise it
-starts on **Save DVD-ready ISO**. Refresh/check-disc can update this automatic
-suggestion, but never changes a manual output choice. **Use automatic** restores
+panel contains PAL/NTSC, 4.7/8.5 GB capacity, ISO/folder output and a live DVD-capacity
+meter. **Burn prepared DVDs** is a separate tab for saved ISOs and the writer.
+Read-only disc discovery runs at startup and every five seconds while idle;
+editing stays available. Automatic output selects **Prepare and burn DVD** for
+a compatible blank DVD or a safely erasable supported rewritable DVD; otherwise
+it selects **Save DVD-ready ISO**. Discovery never changes a manual output choice.
+**Use automatic** restores
 automatic suggestions. Media removal, nonblank/protected/finalized/damaged media,
 unsupported types, insufficient capacity and detection failures are shown explicitly.
 Detection is a snapshot, not a reservation: the exact image and current media are
@@ -22,11 +23,12 @@ checked again before confirmation and immediately before writing.
 Every burn includes a read-only **Disc preflight**: recorder support, DVD type,
 blankness, blocking status and capacity. A supported blank DVD needs no separate
 Windows formatting. Nonblank write-once DVD-R/+R (including dual-layer) cannot be
-erased or reused: insert a new blank disc. For supported DVD-RW/+RW, **Prepare /
-erase disc…** is available after inspection. It identifies the drive and exact
+erased or reused: insert a new blank disc. **Make DVD** (or **Burn selected DVD…**)
+automatically runs the checks and, for supported DVD-RW/+RW, offers preparation
+when needed. It identifies the drive and exact
 media type, checks capacity before asking, and requires a separate **default-No**
 destructive confirmation. All existing contents will be removed. Automatic
-output and Check disc never erase; declining preparation never starts a burn.
+discovery and capacity updates never erase; declining preparation never starts a burn.
 The same preparation permission is requested if a manually requested burn needs
 rewritable-disc erasure. Burning still requires its own separate confirmation.
 
@@ -67,9 +69,24 @@ video download). Titles replace URLs in **Play order** as they arrive; hover a r
 to see its original link. Drag clips to control playback order (or select a clip
 and press **Alt+Up / Alt+Down**): titles
 never sort the list. Pending lookups, failures and cancellation appear in the row.
-**Retry title** (or **Check fit**) retries an unavailable title; **Cancel**, removing
+**Retry title** retries an unavailable title; **Cancel**, removing
 a row, or closing the app stops pending lookups. Successful title/duration results
-are reused by Check fit. Local files keep their filenames.
+are reused by the capacity estimate and Make DVD. Local files keep their filenames.
+
+DVD usage updates automatically after source, metadata, capacity, output or media
+changes, with a short debounce and cancellation of obsolete estimates. Local
+probes are cached by file size/modification time; YouTube uses bounded metadata-only
+lookups, not video downloads. Unknown, failed and pending durations are explicit:
+the meter never pretends that only the successfully inspected clips are the whole DVD.
+The meter estimates **authored MPEG-2 video + audio + mux/author overhead**, not input
+file bytes. Short DVDs occupy less space; longer DVDs auto-fit at a lower bitrate,
+so usage can remain near 95% while quality changes. The displayed bitrate, half-D1
+notice where applicable, 2 Mbps quality floor and existing safety reserves remain.
+For direct burning, both the estimate and encoder budget use the smaller of the
+selected capacity and actual blank-disc capacity (or total capacity after an
+explicitly confirmed RW erase). File output uses the selected target capacity.
+Make DVD performs fresh checks before downloads and conversion; detection failure
+does not silently start file output. Explicit ISO/folder output remains available.
 The interface uses the native Segoe UI family, a restrained teal accent, readable
 sentence-case labels and keyboard focus indicators, following
 [Windows typography guidance](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography)
@@ -82,8 +99,11 @@ cover landscape, silent rotated portrait, PAL/NTSC, manual rotation and overlong
 input and half-D1 encoding, plus ordered stitching with mixed formats and audio.
 Eight authored ISOs have been mounted and their VIDEO_TS hashes matched.
 Saved ISOs also reopen and verify independently of original source/job folders.
-The focused/integration run passed 168 assertions, including image rejection,
-capacity boundaries, image locking and read-back corruption.
+Focused/integration checks cover image rejection, capacity boundaries, image
+locking and read-back corruption. Native WPF regressions also exercise automatic
+capacity updates, pending/failed/stale metadata, actual-media budgets, retained
+manual output choices and unified Make DVD file/preflight transitions. Destructive
+preparation branches are tested with typed fakes, not physical erasures.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. One user-authorized physical DVD+RW burn on an
 HL-DT-ST GT50N succeeded: finalisation returned successfully, all five VIDEO_TS
@@ -220,7 +240,7 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
 1. Drop one or more files or HTTPS YouTube links into the source area, browse
    (multi-select supported), or paste an HTTPS
    YouTube link and click **Add**. Files and links can be mixed. A single
-   pending file/link is also added automatically on Preview, Check fit or Prepare DVD,
+   pending file/link is also added automatically on Preview or Make DVD,
    preserving the quick single-video workflow. Only download/copy
    content you own or have permission to use; no DRM or login bypass is provided.
 2. Drag clips in the queue to arrange parts; an insertion line shows the drop
@@ -234,26 +254,27 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    same padding/rotation geometry as the encode. Metadata rotation is automatic;
    the manual override adds quarter turns. YouTube preview downloads the source
    once and reuses it for that input.
-3. Use **Check fit** for combined duration and single-/dual-layer bitrate estimates.
-   For YouTube it requests public metadata only, without downloading the videos.
+3. Watch **DVD capacity** for automatic combined-duration, authored-size and bitrate
+   estimates. For YouTube it uses public metadata only, without downloading videos.
    A metadata failure makes fit unknown rather than assuming a duration.
-   Prepare DVD checks fit again before downloads, then reprobes the downloaded
+   Make DVD checks fit again before downloads, then reprobes the downloaded
    originals before any conversion. Overlong parts are never silently dropped.
 4. Choose PAL (default, remembered) or NTSC and single-layer or dual-layer capacity.
    Choose **Save DVD-ready ISO** and check the visible **Save to** path (use
-   **Change…** to choose a filename), then click **Prepare DVD**. No drive or inserted
+   **Change…** to choose a filename), then click **Make DVD**. No drive or inserted
    disc is required. The app converts, authors, builds and validates the image,
    and verifies its DVD files against the authored output before saving it.
    DVD folder output is still available, but the burn-later action takes an ISO.
-   If a suitable blank disc is detected, automatic output instead selects
-   **Prepare and burn DVD**; preparation stages a validated ISO and asks for
+   If a suitable blank or safely erasable rewritable disc is detected, automatic
+   output instead selects **Prepare and burn DVD**; Make DVD checks it and asks
+   separately for any required destructive erase before authoring. It stages a validated ISO and asks for
    confirmation before writing. A declined/failed burn keeps that staged ISO
    in the prepared list with its location/status, not as a silent file-output fallback.
 5. Later, double-click portable **Compressr.exe** (or use `.\scripts\Run.ps1`
    from source), insert a compatible blank DVD,
-   select the writer (use **Refresh drives** after connecting one). **Check disc**
-   reports the current format, blank state and exact available bytes without
-   writing, erasing or ejecting it. Then click
+   select the writer. Writers and media are detected automatically; current format,
+   blankness and available capacity are reported without writing, erasing or ejecting.
+   Then click
    **Burn prepared DVDs**, add the saved ISO(s), select one and click
    **Burn selected DVD…**. Confirm the named image and drive.
    No input videos need to be added, and PAL/capacity controls do not alter a
@@ -261,8 +282,8 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
    The single ISO is self-contained: original videos, downloads and job folders
    are not needed, even after restarting the app or moving the ISO elsewhere.
    Burning requires an explicit confirmation. To reuse a supported rewritable
-   disc, check it first, then use **Prepare / erase disc…** and separately confirm
-   destruction of its contents. A write-once disc always needs to be blank.
+   disc, Burn selected DVD checks it and separately asks permission to destroy
+   its contents before the normal burn confirmation. A write-once disc always needs to be blank.
 
 YouTube downloads are capped at 1080p where that rendition exists: ample source
 resolution for a DVD without an unnecessary 4K download.

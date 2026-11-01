@@ -114,8 +114,13 @@ internal static class DiscPreparationTests
         await RejectAsync<IOException>(checkFailure, "postcheck failure is not readiness success");
 
         var automatic = new DvdOutputSelection();
-        automatic.Apply(DiscReadiness.Assess(recorded.Media, 2048));
-        check(automatic.Selected == OutputKind.Iso, "automatic never chooses destructive preparation");
+        var untouched = new FakeDisc(recorded);
+        automatic.Apply(DiscReadiness.Assess(recorded, 2048));
+        check(automatic.Selected == OutputKind.Burn && untouched.Erases == 0 && untouched.ErasePrompts == 0 && untouched.Burns == 0,
+            "automatic offers Make DVD for supported RW but discovery never prompts, erases or burns");
+        automatic.Choose(OutputKind.Iso);
+        automatic.Apply(DiscReadiness.Assess(recorded, 2048));
+        check(automatic.Selected == OutputKind.Iso && untouched.Erases == 0, "explicit ISO bypasses disc preparation even with supported RW");
         using (var cancellation = new CancellationTokenSource())
         {
             var fake = new FakeDisc(recorded) { OnErase = cancellation.Cancel };

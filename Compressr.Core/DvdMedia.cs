@@ -25,11 +25,11 @@ public sealed record DvdMedia(int Type, bool RecorderSupported, bool MediaSuppor
             throw new InvalidOperationException("The inserted medium is not a supported recordable DVD.");
         if (!Blank)
             throw new InvalidOperationException(Type is 7 or 10 or 13
-                ? $"The {Name} is not blank. Use Prepare / erase disc only if you intend to remove all its contents, or insert a blank DVD."
+                ? $"The {Name} is not blank. Make DVD will ask permission to erase a supported rewritable disc. Otherwise insert a blank DVD."
                 : $"The {Name} is write-once and is not blank. It cannot be erased or reused. Insert a new blank DVD.");
         // IMAPI_FORMAT2_DATA_MEDIA_STATE: all unsupported flags block a write, even on a nominally blank disc.
         if (CurrentStatus == 0 || (CurrentStatus & 0xFC00) != 0)
-            throw new InvalidOperationException($"The DVD has a blocking or unknown media status (0x{CurrentStatus:X}). It may be damaged, finalized, write-protected or require explicit preparation. Check disc before trying again.");
+            throw new InvalidOperationException($"The DVD has a blocking or unknown media status (0x{CurrentStatus:X}). It may be damaged, finalized, write-protected or require explicit preparation. Make DVD rechecks before writing.");
         if (TotalSectors <= 0 || FreeSectors <= 0 || FreeSectors > TotalSectors)
             throw new InvalidOperationException("The drive reported invalid DVD capacity. Refresh or reconnect the drive before trying again.");
         PreparedDvd.CheckCapacity(requiredBytes, AvailableBytes);

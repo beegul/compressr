@@ -9,6 +9,30 @@ if (!$env:COMPRESSR_TOOLS) { $env:COMPRESSR_TOOLS = Join-Path $root 'tools' }
 Add-Type -AssemblyName PresentationFramework
 Add-Type -Path (Join-Path $root 'Compressr.Core\bin\Release\net8.0\Compressr.Core.dll')
 Add-Type -Path (Join-Path $root 'Compressr.App\bin\Release\net8.0-windows\Compressr.dll')
+Add-Type -CompilerOptions '/nowarn:1701' -ReferencedAssemblies @(
+    (Join-Path $root 'Compressr.Core\bin\Release\net8.0\Compressr.Core.dll'),
+    (Join-Path $root 'Compressr.App\bin\Release\net8.0-windows\Compressr.dll'),
+    'System.Runtime', 'System.Collections') -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using Compressr.App;
+using Compressr.Core;
+public static class DiscMonitorFixture
+{
+    public static DvdDrive[] Drives = Array.Empty<DvdDrive>();
+    public static DiscInspection Snapshot;
+    public static int Inspections;
+    public static string Failure;
+    public static Func<IReadOnlyList<DvdDrive>> Enumerate => () => Drives;
+    public static Func<DvdDrive, DiscInspection> Inspect => drive =>
+    {
+        Inspections++;
+        if (!string.IsNullOrEmpty(Failure) || Snapshot == null) throw new InvalidOperationException(
+            string.IsNullOrEmpty(Failure) ? "Unavailable test recorder" : Failure);
+        return Snapshot;
+    };
+}
+'@
 $app = [Compressr.App.App]::new()
 $app.InitializeComponent()
 [Threading.SynchronizationContext]::SetSynchronizationContext(
@@ -22,8 +46,8 @@ $titleLookup = [Func[string, Threading.CancellationToken, Threading.Tasks.Task[C
     return $pending.Task.WaitAsync($token)
 }
 $constructor = [Compressr.App.MainWindow].GetConstructor([Reflection.BindingFlags]'Instance,NonPublic',
-    $null, [Type[]]@([string], $titleLookup.GetType()), $null)
-$window = $constructor.Invoke([object[]]@([string]$testState, $titleLookup))
+    $null, [Type[]]@([string], $titleLookup.GetType(), [DiscMonitorFixture]::Enumerate.GetType(), [DiscMonitorFixture]::Inspect.GetType()), $null)
+$window = $constructor.Invoke([object[]]@([string]$testState, $titleLookup, [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
 $ui = @{}
 $script:checks = 0
 function Check([bool]$condition, [string]$message) {
@@ -68,6 +92,13 @@ function Await-Idle {
         Start-Sleep -Milliseconds 10
     }
 }
+function Await-Estimate {
+    $field = $window.GetType().GetField('estimateRefresh', [Reflection.BindingFlags]'Instance,NonPublic')
+    do {
+        $task = $field.GetValue($window)
+        if ($task) { Await-Task $task }
+    } while ($task -ne $field.GetValue($window))
+}
 function Layout([double]$width, [double]$height) {
     $window.Content.Measure([Windows.Size]::new($width, $height))
     $window.Content.Arrange([Windows.Rect]::new(0, 0, $width, $height))
@@ -96,7 +127,7 @@ try {
     foreach ($name in @('Source', 'Inputs', 'Estimate', 'Preview', 'RotationLabel', 'Standard', 'Capacity',
         'Output', 'Drives', 'Options', 'BurnOptions', 'StartButton', 'CancelButton', 'Stage', 'Progress', 'Status',
         'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
-        'BurnSelectedButton', 'RemovePreparedButton', 'PrepareDiscButton', 'SourcePrepareDiscButton', 'RetryTitleButton', 'OrientationOptions')) {
+        'BurnSelectedButton', 'RemovePreparedButton', 'CapacityMeter', 'CapacitySummary', 'RetryTitleButton', 'OrientationOptions')) {
         Check ($null -ne $window.FindName($name)) "Retained $name"
         $ui[$name] = $window.FindName($name)
     }
@@ -110,6 +141,9 @@ try {
     }
     Check ($window.FontSize -eq 14) 'Readable 14 DIP body typography'
     Check ($null -eq $window.GetType().GetMethod('SaveScreenshot', [Reflection.BindingFlags]'Instance,NonPublic')) 'User-facing screenshot functionality removed'
+    foreach ($removed in @('CheckFit', 'CheckDisc', 'PrepareDisc', 'RefreshDrives')) {
+        Check ($null -eq $window.GetType().GetMethod($removed, [Reflection.BindingFlags]'Instance,NonPublic')) "Manual $removed action removed; orchestration uses Make DVD"
+    }
     Check ($ui.Capacity.SelectedItem -eq [Compressr.Core.DiscSize]::SingleLayer) 'Unchanged single-layer default'
     Check ($ui.Output.SelectedIndex -eq 0) 'Unchanged ISO default'
     $ui.Capacity.SelectedItem = [Compressr.Core.DiscSize]::DualLayer
@@ -121,7 +155,7 @@ try {
     Check ($ui.Output.SelectedItem -eq 'Save DVD folder') 'Folder output remains selectable'
     Check ($ui.SavePath.Text.Contains('Compressr-DVD-')) 'Folder destination visible before preparation'
     $ui.Output.SelectedIndex = 2
-    Check ($ui.SaveOptions.Visibility -eq 'Collapsed' -and $ui.StartButton.Content -eq '_Prepare and burn…') 'Direct burn has a distinct primary action'
+    Check ($ui.SaveOptions.Visibility -eq 'Collapsed' -and $ui.StartButton.Content -eq '_Make DVD') 'Direct burn uses unified Make DVD action'
     $ui.Output.SelectedIndex = 0
     Check ($ui.SaveOptions.Visibility -eq 'Visible' -and $ui.SavePath.Text.EndsWith('.iso')) 'ISO destination visible before preparation'
     $chosenPath = $ui.SavePath.Text
@@ -131,22 +165,29 @@ try {
     Check ($ui.Inputs.Items.Count -eq 0) 'Empty queue'
     $blank = [Compressr.Core.DvdMedia]::new(7, $true, $true, $true, $true, 2295104, 2295104, 2)
     $recorded = [Compressr.Core.DvdMedia]::new(7, $true, $true, $false, $false, 2295104, 2295104, 1)
-    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($blank, $true, 'fake:1', $null))
-    Check (!$ui.PrepareDiscButton.IsEnabled -and !$ui.SourcePrepareDiscButton.IsEnabled) 'Blank DVD needs no erase action'
-    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($recorded, $true, 'fake:1', $null))
-    Check ($ui.PrepareDiscButton.IsEnabled -and $ui.SourcePrepareDiscButton.IsEnabled) 'Supported nonblank RW exposes explicit preparation in both workflows'
-    Check ($ui.Output.SelectedIndex -eq 0) 'Making erasure available never changes output or starts a burn'
-    Invoke-Handler 'SetPreparationAvailable' @([Compressr.Core.DiscInspection]::new($recorded, $false, $null, 'unsupported'))
-    Check (!$ui.PrepareDiscButton.IsEnabled -and !$ui.SourcePrepareDiscButton.IsEnabled) 'Unsupported erasure stays disabled'
+    $fixtureDrive = [Compressr.App.DvdDrive]::new('fixture-never-write', 'Fixture writer (no writes)', '')
+    [DiscMonitorFixture]::Drives = @($fixtureDrive)
+    [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new($blank, $true, 'fake:1', $null)
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    Check ($ui.Output.SelectedIndex -eq 0) 'Background disc discovery preserves explicit ISO choice'
+    Invoke-Handler 'UseAutomaticOutput' @($null, [Windows.RoutedEventArgs]::new())
+    Check ($ui.Output.SelectedIndex -eq 2) 'Automatic selects blank DVD without a manual check'
+    [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new($recorded, $true, 'fake:1', $null)
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    Check ($ui.Output.SelectedIndex -eq 2 -and $ui.DiscStatus.Text.Contains('permission')) 'Nonblank supported RW is offered through Make DVD, not erased by refresh'
+    [DiscMonitorFixture]::Failure = 'Fixture device inaccessible'
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    Check ($ui.DiscStatus.Text.Contains('Fixture device inaccessible') -and $ui.Options.IsEnabled) 'Read-only detection failure is explicit without blocking editing'
+    [DiscMonitorFixture]::Drives = @()
+    [DiscMonitorFixture]::Failure = $null
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    $ui.Output.SelectedIndex = 0
     $eraseField = $window.GetType().GetField('erasing', [Reflection.BindingFlags]'Instance,NonPublic')
     $eraseField.SetValue($window, $true)
     Invoke-Handler 'Busy' @($true)
     Check (!$ui.CancelButton.IsEnabled -and !$ui.Options.IsEnabled -and !$ui.BurnOptions.IsEnabled) 'Synchronous IMAPI erasure prevents cancel and concurrent UI operations'
     $eraseField.SetValue($window, $false)
     Invoke-Handler 'Busy' @($false)
-    Invoke-Handler 'PrepareDisc' @($null, [Windows.RoutedEventArgs]::new())
-    Await-Idle
-    Check ($ui.Stage.Text -eq 'Disc not ready' -and $ui.Status.Text.Contains('No DVD writer selected')) 'Preparation without a writer fails explicitly without confirmation'
     Layout 1008 921
     Screenshot 'interface-empty.png'
     Invoke-Handler 'AddVideo' @('https://youtu.be/first')
@@ -175,9 +216,53 @@ try {
     Check ($panel.Children[0].Text -eq $secondVideo.Label -and $panel.ToolTip -eq $secondVideo.Input) 'Actual queue template binds title and retains original URL tooltip'
     Screenshot 'interface-youtube-titles.png'
     $requestCount = $titleRequests.Count
-    Invoke-Handler 'CheckFit' @($null, [Windows.RoutedEventArgs]::new())
-    Await-Idle
-    Check ($ui.Stage.Text -eq 'Fit checked' -and $titleRequests.Count -eq $requestCount) "Native Check fit reuses resolved metadata without requesting again: $($ui.Status.Text)"
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.StartsWith('About ') -and $ui.Estimate.Text.Contains('3.0 minutes') -and
+        $titleRequests.Count -eq $requestCount -and !$ui.CapacityMeter.IsIndeterminate) "Automatic usage reuses resolved metadata without requesting again: $($ui.Estimate.Text)"
+    Check ($ui.Options.IsEnabled -and $ui.StartButton.IsEnabled -and $ui.CapacityMeter.Value -gt 0) 'Automatic meter remains usable without locking the queue'
+    $singlePercent = $ui.CapacityMeter.Value
+    $ui.Capacity.SelectedItem = [Compressr.Core.DiscSize]::DualLayer
+    Await-Estimate
+    Check ($ui.CapacityMeter.Value -lt $singlePercent -and $titleRequests.Count -eq $requestCount) 'Capacity changes automatically recompute fullness without repeating metadata lookup'
+    [DiscMonitorFixture]::Drives = @($fixtureDrive)
+    [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new(
+        [Compressr.Core.DvdMedia]::new(9, $true, $true, $true, $true, 1953125, 1953125, 2), $false, $null, $null)
+    $ui.Output.SelectedIndex = 2
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.Contains('/ 4.00 GB') -and $ui.Estimate.Text.Contains('actual disc')) "Meter uses actual available media capacity rather than oversized selected target: $($ui.CapacitySummary.Text) / $($ui.Estimate.Text) / $($ui.DiscStatus.Text)"
+    [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new(
+        [Compressr.Core.DvdMedia]::new(7, $true, $true, $false, $false, 1953125, 0, 1), $true, 'fake:2', $null)
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.Contains('/ 4.00 GB')) 'Nonblank RW estimate uses post-erase total capacity without erasing'
+    Layout 1008 921
+    Screenshot 'make-dvd-rewritable-capacity.png'
+    [DiscMonitorFixture]::Drives = @()
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    $ui.Output.SelectedIndex = 0
+    $ui.Capacity.SelectedItem = [Compressr.Core.DiscSize]::SingleLayer
+    Invoke-Handler 'AddVideo' @('https://youtu.be/too-long')
+    $titleRequests['https://youtu.be/too-long'].SetResult([Compressr.Core.YouTubeInfo]::new('Too long fixture', 20000))
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.StartsWith('Too long') -and $ui.Estimate.Text.Contains('2 Mbps') -and $ui.CapacityMeter.Value -eq 100) 'Too-long state reports quality floor rather than promising auto-fit at unsafe quality'
+    Layout 1008 921
+    Screenshot 'automatic-capacity-too-long.png'
+    Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.StartsWith('About ') -and $ui.Estimate.Text.Contains('3.0 minutes')) 'Removal replaces previous capacity result with current source snapshot'
+    Invoke-Handler 'AddVideo' @('https://youtu.be/stale')
+    $staleDeadline = [DateTime]::UtcNow.AddMilliseconds(450)
+    while ([DateTime]::UtcNow -lt $staleDeadline) {
+        [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+        Start-Sleep -Milliseconds 10
+    }
+    Check ($ui.CapacityMeter.IsIndeterminate -and $ui.Options.IsEnabled) 'Pending duration displays indeterminate capacity without blocking editing'
+    Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+    $titleRequests['https://youtu.be/stale'].SetResult([Compressr.Core.YouTubeInfo]::new('Removed obsolete result', 30000))
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.StartsWith('About ') -and $ui.Estimate.Text.Contains('3.0 minutes')) 'Obsolete in-flight duration result cannot overwrite a newer source snapshot'
+    $ui.Inputs.SelectedItem = $secondVideo
     Invoke-Handler 'MoveDown' @($null, [Windows.RoutedEventArgs]::new())
     Check ($ui.Inputs.Items[1].Input -eq 'https://youtu.be/second') 'Move down preserves playback order'
     Invoke-Handler 'ReorderInput' @($firstVideo, 2)
@@ -213,6 +298,7 @@ try {
         $titleRequests["https://youtu.be/$number"].SetResult([Compressr.Core.YouTubeInfo]::new("Video part $number - a complete descriptive clip title", 60))
     }
     foreach ($item in $ui.Inputs.Items) { Await-Task ($item.MetadataAsync($titleLookup, [Threading.CancellationToken]::None)) }
+    Await-Estimate
     Layout 1008 921
     $queueNormalHeight = $ui.Inputs.ActualHeight
     Check ($queueNormalHeight -ge 240) "Normal window queue has room for at least six single-line clips ($queueNormalHeight DIP)"
@@ -221,10 +307,12 @@ try {
     $fourthRow = $ui.Inputs.ItemContainerGenerator.ContainerFromIndex(3)
     Check ($fourthRow.TranslatePoint([Windows.Point]::new(0, $fourthRow.ActualHeight), $ui.Inputs).Y -le $ui.Inputs.ActualHeight) 'All four clips fit without scrolling in the maximized queue'
     Screenshot 'workspace-maximized.png'
+    Screenshot 'automatic-capacity-maximized.png'
     $ui.OrientationOptions.IsExpanded = $true
     Layout 1008 921
     Check ($ui.OrientationOptions.Content.ActualHeight -ge 100 -and $ui.Inputs.ActualHeight -ge 180) "Orientation controls remain accessible with useful queue space (content=$($ui.OrientationOptions.Content.ActualHeight), queue=$($ui.Inputs.ActualHeight))"
     Screenshot 'workspace-normal.png'
+    Screenshot 'automatic-capacity-normal.png'
     $ui.OrientationOptions.IsExpanded = $false
     $badData = [Windows.DataObject]::new()
     $badData.SetText('https://youtube.com.evil.example/watch?v=no')
@@ -258,6 +346,8 @@ try {
     $titleRequests[$failedVideo.Input].SetException([IO.IOException]::new('Fixture offline'))
     [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
     Check ($failedVideo.TitleStatus.Contains('Fixture offline') -and $failedVideo.Label -eq $failedVideo.Input -and $ui.RetryTitleButton.IsEnabled) 'Native row reports lookup failure, keeps the URL and enables retry'
+    Await-Estimate
+    Check ($ui.CapacitySummary.Text.Contains('unknown') -and $ui.Estimate.Text.Contains('Fixture offline')) 'Incomplete metadata is explicit unknown capacity, not a partial success meter'
     Invoke-Handler 'RetryTitle' @($null, [Windows.RoutedEventArgs]::new())
     $titleRequests[$failedVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('Recovered video title', 30))
     Await-Task ($failedVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
@@ -330,6 +420,8 @@ try {
         $fileDrop.SetFileDropList($files)
         $drop = Drop-Data $fileDrop
         Check ($drop.Handled -and $ui.Inputs.Items.Count -eq $SourceVideoPaths.Count -and $ui.Inputs.Items[0].IsLocal) 'Native file drop still adds existing local videos without remote title lookups'
+        Await-Estimate
+        Check ($ui.CapacitySummary.Text.StartsWith('About ') -and $ui.CapacityMeter.Value -gt 0) 'Local generated clips populate live capacity meter without a manual check or video conversion'
         while ($ui.Inputs.Items.Count -gt 0) { Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new()) }
         $destination = Join-Path $testState 'source-job.iso'
         $window.GetType().GetField('isoDestination', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, [string]$destination)
@@ -344,7 +436,7 @@ try {
         $ui.WorkspaceTabs.SelectedIndex = 1
         Layout 1008 921
         Screenshot 'interface-prepared-job.png'
-        $restored = $constructor.Invoke([object[]]@([string]$testState, $titleLookup))
+        $restored = $constructor.Invoke([object[]]@([string]$testState, $titleLookup, [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
         try {
             $restoredJobs = $restored.FindName('PreparedJobs')
             Check ($restoredJobs.Items.Count -eq $ui.PreparedJobs.Items.Count) 'Prepared list reloads across app windows'
@@ -365,13 +457,19 @@ try {
         Check ($ui.Output.SelectedIndex -eq 2) 'Failed direct burn never silently falls back to file'
         $driveType = $window.GetType().Assembly.GetType('Compressr.App.DvdDrive')
         $unavailable = [Activator]::CreateInstance($driveType, [object[]]@('unavailable-test-recorder', 'Unavailable test recorder', ''))
-        $ui.Drives.ItemsSource = @($unavailable)
-        $ui.Drives.SelectedIndex = 0
-        Await-Idle
+        [DiscMonitorFixture]::Drives = @($unavailable)
+        [DiscMonitorFixture]::Failure = 'Fixture device inaccessible'
+        Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
         Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
         Await-Idle
         Check ($ui.Stage.Text -eq 'Could not complete DVD' -and $ui.Status.Text -notmatch 'calling thread|different thread owns it') 'Unavailable recorder reaches IMAPI preflight without accessing UI controls from its STA thread'
         Check ($ui.Output.SelectedIndex -eq 2 -and @(Get-ChildItem (Join-Path $testState 'jobs') -Filter '*.iso' -Recurse -ErrorAction SilentlyContinue).Count -eq 0) 'Unavailable recorder never starts conversion or falls back to an ISO'
+        Invoke-Handler 'UseAutomaticOutput' @($null, [Windows.RoutedEventArgs]::new())
+        Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
+        Await-Idle
+        Check ($ui.Stage.Text -eq 'Could not complete DVD' -and $ui.Status.Text.Contains('Nothing was started')) 'Failed fresh automatic detection never silently becomes a file-writing action'
+        [DiscMonitorFixture]::Drives = @()
+        [DiscMonitorFixture]::Failure = $null
     }
     foreach ($pair in @(
         @('#183344', '#FFFFFF'), @('#506575', '#FFFFFF'), @('#506575', '#EDF2F5'),
@@ -386,6 +484,6 @@ try {
 } finally {
     $window.Close()
     $app.Shutdown()
-    if (Test-Path -LiteralPath $testState) { Remove-Item -LiteralPath $testState -Recurse }
+    if (Test-Path -LiteralPath $testState) { Remove-Item -LiteralPath $testState -Recurse -Force }
     $env:COMPRESSR_TOOLS = $previousTools
 }

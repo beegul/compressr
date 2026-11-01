@@ -75,7 +75,7 @@ public static class DiscWriter
     {
         string? owner = recorder.ExclusiveAccessOwner as string;
         if (!string.IsNullOrEmpty(owner))
-            throw new InvalidOperationException($"The DVD writer is busy or locked by {owner}. Close that operation and check disc again.");
+            throw new InvalidOperationException($"The DVD writer is busy or locked by {owner}. Close that operation and try Make DVD again.");
     }
 
     public static DiscInspection InspectPreparation(DvdDrive drive)
@@ -98,7 +98,7 @@ public static class DiscWriter
                 bool supported = (bool)erase.IsRecorderSupported(recorder) && (bool)erase.IsCurrentMediaSupported(recorder);
                 var current = ReadMedia(recorder, data);
                 if (identity != MediaIdentity(drive) || media != current)
-                    throw new IOException("The disc changed during inspection. Check disc again.");
+                    throw new IOException("The disc changed during inspection. Try Make DVD again.");
                 return new(media, supported, identity, supported ? null : "IMAPI does not support erasing this recorder/media combination");
             }
             catch (Exception ex) when (ex is COMException or IOException or Win32Exception or InvalidOperationException)
@@ -150,7 +150,7 @@ public static class DiscWriter
     private static Win32Exception DeviceError(DvdDrive drive, string action)
     {
         int error = Marshal.GetLastWin32Error();
-        return new(error, $"{action} ({drive.Label}): {new Win32Exception(error).Message} (Windows error {error}). Check disc again.");
+        return new(error, $"{action} ({drive.Label}): {new Win32Exception(error).Message} (Windows error {error}). Try Make DVD again.");
     }
     private static string MediaIdentity(DvdDrive drive)
     {

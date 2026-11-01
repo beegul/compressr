@@ -8,7 +8,7 @@ public sealed record DiscInspection(DvdMedia Media, bool EraseSupported, string?
     {
         if (!NeedsErase) { Media.Check(requiredBytes); return; }
         if (!Media.RecorderSupported || Media.Type is not (6 or 7 or 8 or 9 or 10 or 11 or 13))
-            throw new InvalidOperationException("Insert a supported writable DVD, then check disc again.");
+            throw new InvalidOperationException("Insert a supported writable DVD, then try Make DVD again.");
         if (Media.TotalSectors <= 0 || Media.FreeSectors < 0 || Media.FreeSectors > Media.TotalSectors)
             throw new InvalidOperationException("The drive reported invalid DVD capacity. No disc was erased.");
         PreparedDvd.CheckCapacity(requiredBytes, checked(Media.TotalSectors * 2048));

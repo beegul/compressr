@@ -56,6 +56,28 @@ foreach (DiscSize size in Enum.GetValues<DiscSize>())
     Check(low.Width == 352 && low.Height == 480, "half-D1 at safe low bitrate");
 }
 Check(DvdPlan.Create(landscape with { Duration = 14000 }, TelevisionSystem.PAL, DiscSize.DualLayer, 0).Capacity > pal.Capacity, "dual layer extends fit");
+var shortEstimate = DvdCapacityEstimate.Create(landscape with { Duration = 60 }, TelevisionSystem.PAL, DiscSize.SingleLayer);
+Check(shortEstimate.Fits && shortEstimate.Percent < 3 && shortEstimate.VideoBitrate == 8_000_000,
+    "short DVD meter reflects estimated authored audio/video/overhead rather than filling the disc");
+var longEstimate = DvdCapacityEstimate.Create(landscape with { Duration = 10800 }, TelevisionSystem.PAL, DiscSize.SingleLayer);
+Check(longEstimate.Fits && longEstimate.Percent <= 95 && longEstimate.Percent > 94 &&
+    longEstimate.VideoBitrate < pal.VideoBitrate, "longer DVD auto-fits by reducing bitrate with reserve, not by exceeding capacity");
+const long smallerMedia = 4_000_000_000;
+var actualEstimate = DvdCapacityEstimate.Create(landscape, TelevisionSystem.PAL, DiscSize.DualLayer, smallerMedia);
+var actualPlan = DvdPlan.Create(landscape, TelevisionSystem.PAL, DiscSize.DualLayer, 0, smallerMedia);
+Check(actualPlan.Capacity == smallerMedia && actualEstimate.Capacity == actualPlan.Capacity &&
+    actualEstimate.VideoBitrate == actualPlan.VideoBitrate && actualEstimate.EstimatedBytes <= smallerMedia * .95,
+    "actual media capacity constrains both displayed estimate and encoder budget");
+Check(DvdPlan.Create(landscape, TelevisionSystem.PAL, DiscSize.SingleLayer, 0, 9_000_000_000).Capacity == pal.Capacity,
+    "larger actual media never silently overrides chosen capacity");
+Check(!DvdCapacityEstimate.Create(landscape with { Duration = 18000 }, TelevisionSystem.PAL, DiscSize.SingleLayer).Fits,
+    "too-long feedback preserves quality-floor rejection");
+double actualBoundary = (smallerMedia * .95 - 32 * 1024 * 1024) * 8 / ((DvdPlan.MinimumBitrate + DvdPlan.AudioBitrate) * 1.04);
+Check(DvdCapacityEstimate.Create(landscape with { Duration = actualBoundary - .1 }, TelevisionSystem.NTSC, DiscSize.DualLayer, smallerMedia).Fits &&
+    !DvdCapacityEstimate.Create(landscape with { Duration = actualBoundary + .1 }, TelevisionSystem.NTSC, DiscSize.DualLayer, smallerMedia).Fits,
+    "actual-capacity meter and quality floor agree at the measured boundary");
+Throws<ArgumentOutOfRangeException>(() => DvdCapacityEstimate.Create(landscape, TelevisionSystem.PAL, DiscSize.SingleLayer, 0), "invalid actual capacity");
+Throws<ArgumentException>(() => DvdCapacityEstimate.Create(landscape with { Duration = double.NaN }, TelevisionSystem.PAL, DiscSize.SingleLayer), "unknown duration is not success-shaped meter");
 MediaTools.ValidateYouTube("https://www.youtube.com/watch?v=abc");
 MediaTools.ValidateYouTube("https://youtu.be/abc");
 Throws<ArgumentException>(() => MediaTools.ValidateYouTube("https://youtube.com.evil.example/watch?v=x"), "lookalike host");
@@ -134,6 +156,20 @@ var selection = new DvdOutputSelection();
 Check(selection.Selected == OutputKind.Iso && !selection.IsManual, "safe initial file default");
 selection.Apply(ready);
 Check(selection.Selected == OutputKind.Burn, "ready blank DVD automatically selects burn");
+var erasable = DiscReadiness.Assess(new DiscInspection(attached with { PhysicallyBlank = false, HeuristicallyBlank = false, CurrentStatus = 1 },
+    true, "fixture:1"), 2048);
+Check(!erasable.Ready && erasable.NeedsPreparation && !erasable.DetectionFailed,
+    "erasable RW is distinct from already-blank readiness and never marked ready before erasure");
+selection.Apply(erasable);
+Check(selection.Selected == OutputKind.Burn, "automatic Make DVD offers confirmed preparation for supported RW");
+selection.Choose(OutputKind.Iso);
+selection.Apply(erasable);
+Check(selection.Selected == OutputKind.Iso && selection.IsManual, "explicit ISO is respected even with erasable RW present");
+selection.UseAutomatic(ready);
+Check(DiscReadiness.Failed("access denied").DetectionFailed, "detection failure remains distinguishable from ordinary no-media/file default");
+Check(DiscReadiness.Assess(new DiscInspection(attached with { PhysicallyBlank = false, HeuristicallyBlank = false },
+    false, null, "Media-change detection denied"), 2048).DetectionFailed,
+    "failed RW identity inspection blocks automatic action-time file fallback rather than pretending ordinary unavailable media");
 foreach (var absent in new[] { DiscReadiness.NoWriter, tooSmall, DiscReadiness.Failed("device removed") })
 {
     selection.Apply(absent);
