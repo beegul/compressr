@@ -35,6 +35,24 @@ public sealed class DiscPreparation
 {
     private int active;
 
+    public static void EraseConfirmed(DiscInspection approved, long requiredBytes,
+        Func<IDisposable> preventRemoval, Func<DiscInspection> inspect,
+        Func<IDisposable> acquireExclusive, Func<DvdMedia> readLockedMedia, Action erase,
+        CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        using var removalLock = preventRemoval();
+        // The tray must remain locked across the counter check and the IMAPI lock.
+        // A separate device handle cannot query the counter under IMAPI exclusive access.
+        var current = inspect();
+        approved.CheckUnchanged(current, requiredBytes);
+        token.ThrowIfCancellationRequested();
+        using var exclusive = acquireExclusive();
+        approved.CheckUnchanged(current with { Media = readLockedMedia() }, requiredBytes);
+        token.ThrowIfCancellationRequested();
+        erase();
+    }
+
     public async Task<DiscPreparationResult> RunAsync(long requiredBytes,
         Func<CancellationToken, Task<DiscInspection>> inspect,
         Func<DiscInspection, bool> confirmErase,

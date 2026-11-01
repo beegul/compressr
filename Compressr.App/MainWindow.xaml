@@ -2,46 +2,47 @@
         xmlns:core="clr-namespace:Compressr.Core;assembly=Compressr.Core"
         Title="Compressr — Video in. DVD out." Width="1024" Height="960" MinWidth="720" MinHeight="690" Background="White" WindowStartupLocation="CenterScreen"
         FontFamily="Segoe UI Variable, Segoe UI" FontSize="14" Foreground="{StaticResource Ink}"
-        AllowDrop="True" Drop="OnDrop" DragOver="OnDragOver" Closing="OnClosing">
-  <Grid Background="White">
+        AllowDrop="True" PreviewDrop="OnDrop" PreviewDragOver="OnDragOver" Closing="OnClosing">
+  <Grid Background="White" SizeChanged="WorkspaceSizeChanged">
     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-    <Border Background="#183344" Padding="24,20">
-      <DockPanel>
-        <Button Content="Save screenshot" Click="SaveScreenshot" DockPanel.Dock="Right" VerticalAlignment="Center" FontSize="12" Padding="12,7"/>
+    <Border x:Name="ProductHeader" Background="#183344" Padding="24,14">
         <StackPanel>
-          <TextBlock Text="Compressr" FontSize="28" FontWeight="SemiBold" Foreground="White"/>
-          <TextBlock Text="Video in. DVD out." FontSize="16" Foreground="#CBDFE8" Margin="0,4,0,0"/>
+          <TextBlock Text="Compressr" FontSize="24" FontWeight="SemiBold" Foreground="White"/>
+          <TextBlock x:Name="ProductPromise" Text="Video in. DVD out." FontSize="14" Foreground="#CBDFE8" Margin="0,2,0,0"/>
         </StackPanel>
-      </DockPanel>
     </Border>
     <TabControl x:Name="WorkspaceTabs" Grid.Row="1" SelectionChanged="WorkspaceChanged" Padding="0" BorderThickness="0" Margin="16,12,16,0">
       <TabItem Header="Prepare from videos" Padding="16,8">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-          <WrapPanel x:Name="Options" Margin="8,20,8,16">
-          <StackPanel Width="560" Margin="0,0,24,20">
-            <TextBlock Text="Your videos" FontSize="20" FontWeight="SemiBold"/>
-            <TextBlock Text="Drop files here, browse, or paste a YouTube link." Foreground="{StaticResource Muted}" Margin="0,6,0,16"/>
-            <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="16">
+          <Grid x:Name="Options" Margin="8,16,8,16">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="24"/><ColumnDefinition Width="0.6*" MinWidth="280" MaxWidth="400"/></Grid.ColumnDefinitions>
+          <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*" MinHeight="140"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <StackPanel>
+            <TextBlock x:Name="SourceHeading" Text="Your videos" FontSize="20" FontWeight="SemiBold"/>
+            <TextBlock x:Name="SourceHelp" Text="Drop files or YouTube links here, or browse." Foreground="{StaticResource Muted}" Margin="0,4,0,12"/>
+            <Border x:Name="SourceEntry" Background="{StaticResource Surface}" CornerRadius="6" Padding="16">
               <StackPanel>
-                <DockPanel Margin="0,0,0,12">
-                  <Button Content="_Browse files…" Click="Browse" DockPanel.Dock="Right"/>
-                  <TextBlock Text="Add one video or several parts" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                <DockPanel Margin="0,0,0,6">
+                  <Button Content="_Browse files…" Click="Browse" DockPanel.Dock="Right" FontSize="12" MinHeight="28" Padding="8,4"/>
+                  <Label Content="Video file or YouTube link" Target="{Binding ElementName=Source}" Padding="0" VerticalAlignment="Center" Margin="0,0,8,0"/>
                 </DockPanel>
-                <Label Content="Video file or YouTube link" Target="{Binding ElementName=Source}" Padding="0" Margin="0,0,0,6"/>
                 <DockPanel>
                   <Button Content="_Add" Click="AddInput" DockPanel.Dock="Right" Margin="8,0,0,0"/>
                   <TextBox x:Name="Source" AutomationProperties.Name="Video file or YouTube link" TextChanged="SourceChanged"/>
                 </DockPanel>
               </StackPanel>
             </Border>
-            <TextBlock x:Name="QueueSummary" Text="Play order" FontWeight="SemiBold" Margin="0,20,0,8"/>
-            <Grid>
-              <ListBox x:Name="Inputs" Height="124" BorderBrush="#B6C5CE" SelectionChanged="InputSelected"
-                       AutomationProperties.Name="Ordered videos" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            </StackPanel>
+            <TextBlock x:Name="QueueSummary" Grid.Row="1" Text="Play order" FontWeight="SemiBold" Margin="0,16,0,8"/>
+            <Grid Grid.Row="2" MinHeight="140">
+              <ListBox x:Name="Inputs" BorderBrush="#B6C5CE" SelectionChanged="InputSelected"
+                       PreviewMouseLeftButtonDown="QueueMouseDown" PreviewMouseMove="QueueMouseMove" PreviewKeyDown="QueueKeyDown" DragLeave="QueueDragLeave"
+                       AutomationProperties.Name="Ordered videos" AutomationProperties.HelpText="Drag a clip to reorder. Alternatively, select it and press Alt+Up or Alt+Down."
+                       ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True">
                 <ListBox.ItemTemplate>
                   <DataTemplate>
                     <StackPanel ToolTip="{Binding Detail}">
-                      <TextBlock Text="{Binding Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                      <TextBlock Text="{Binding Label}" TextWrapping="Wrap"/>
                       <TextBlock Text="{Binding TitleStatus}" FontSize="12" Foreground="{StaticResource Muted}" TextTrimming="CharacterEllipsis">
                         <TextBlock.Style><Style TargetType="TextBlock"><Style.Triggers><DataTrigger Binding="{Binding TitleStatus}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
                       </TextBlock>
@@ -59,36 +60,20 @@
                 <TextBlock Text="Added videos appear here, in DVD playback order." Foreground="{StaticResource Muted}" Margin="0,6,0,0"/>
               </StackPanel>
             </Grid>
-            <WrapPanel Margin="0,8,0,0">
+            <WrapPanel Grid.Row="3" Margin="0,8,0,0">
               <WrapPanel.Resources>
                 <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
                   <Setter Property="Margin" Value="0,0,8,0"/><Setter Property="Padding" Value="12,7"/>
                   <Style.Triggers><DataTrigger Binding="{Binding ElementName=Inputs, Path=SelectedItem}" Value="{x:Null}"><Setter Property="IsEnabled" Value="False"/></DataTrigger></Style.Triggers>
                 </Style>
               </WrapPanel.Resources>
-              <Button Content="Move up" Click="MoveUp"/><Button Content="Move down" Click="MoveDown"/><Button Content="Remove" Click="RemoveInput"/>
+              <Button Content="Remove" Click="RemoveInput"/>
               <Button x:Name="RetryTitleButton" Content="Retry title" Click="RetryTitle" IsEnabled="{Binding ElementName=Inputs, Path=SelectedItem.CanRetryTitle, FallbackValue=False, TargetNullValue=False}" ToolTip="Retry an unavailable YouTube title without downloading the video."/>
             </WrapPanel>
-            <TextBlock Text="Whole videos are joined. YouTube playback timestamps are ignored." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
-            <Grid Margin="0,20,0,0">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="240"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-              <Border Background="#183344" CornerRadius="4" Height="135">
-                <Grid>
-                  <TextBlock Text="Orientation preview" Foreground="#CBDFE8" HorizontalAlignment="Center" VerticalAlignment="Center">
-                    <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding ElementName=Preview, Path=Source}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
-                  </TextBlock>
-                  <Image x:Name="Preview" Stretch="Uniform" AutomationProperties.Name="DVD orientation preview"/>
-                </Grid>
-              </Border>
-              <StackPanel Grid.Column="1" Margin="16,0,0,0">
-                <TextBlock Text="Selected video's orientation" FontWeight="SemiBold"/>
-                <TextBlock Text="Metadata rotation is automatic." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,4,0,8"/>
-                <WrapPanel><Button Content="Preview / refresh" Click="ShowPreview" Padding="10,6" Margin="0,0,8,0"/><Button Content="Rotate right ↻" Click="Rotate" Padding="10,6"/></WrapPanel>
-                <TextBlock x:Name="RotationLabel" Text="Extra rotation: 0°" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
-              </StackPanel>
-            </Grid>
-          </StackPanel>
-          <StackPanel Width="344" Margin="0,0,0,20">
+            <TextBlock x:Name="QueueInstructions" Grid.Row="4" Text="Drag clips to set play order · Alt+↑ / Alt+↓ with keyboard. Whole videos are joined; link timestamps are ignored." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
+          </Grid>
+          <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
             <Border Background="{StaticResource Surface}" CornerRadius="6" Padding="20">
               <StackPanel>
                 <TextBlock Text="Your DVD" FontSize="20" FontWeight="SemiBold"/>
@@ -137,40 +122,62 @@
                 </Border>
               </StackPanel>
             </Border>
+            <Expander x:Name="OrientationOptions" Header="Selected video's orientation" Margin="0,16,0,0">
+            <Grid Margin="0,8,0,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="0.8*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Border Background="#183344" CornerRadius="4" Height="100">
+                <Grid>
+                  <TextBlock Text="Orientation preview" Foreground="#CBDFE8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding ElementName=Preview, Path=Source}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+                  </TextBlock>
+                  <Image x:Name="Preview" Stretch="Uniform" AutomationProperties.Name="DVD orientation preview"/>
+                </Grid>
+              </Border>
+              <StackPanel Grid.Column="1" Margin="16,0,0,0">
+                <TextBlock Text="Metadata rotation is automatic." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
+                <WrapPanel><Button Content="Preview / refresh" Click="ShowPreview" Padding="10,6" Margin="0,0,8,0"/><Button Content="Rotate right ↻" Click="Rotate" Padding="10,6"/></WrapPanel>
+                <TextBlock x:Name="RotationLabel" Text="Extra rotation: 0°" FontSize="12" Foreground="{StaticResource Muted}" Margin="0,8,0,0"/>
+              </StackPanel>
+            </Grid>
+            </Expander>
             <TextBlock Text="Only download and copy videos you own or have permission to use." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,20,0,0"/>
           </StackPanel>
-          </WrapPanel>
-        </ScrollViewer>
+          </ScrollViewer>
+          </Grid>
       </TabItem>
       <TabItem Header="Burn prepared DVDs" Padding="16,8">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-          <StackPanel x:Name="BurnOptions" Margin="8,20,8,16">
-            <Border>
-              <WrapPanel>
-                <StackPanel Width="560" Margin="0,0,24,16">
+          <Grid x:Name="BurnOptions" Margin="8,16,8,16">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="24"/><ColumnDefinition Width="0.6*" MinWidth="280" MaxWidth="400"/></Grid.ColumnDefinitions>
+                <Grid>
+                  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                  <StackPanel>
                   <DockPanel>
                     <Button Content="Add prepared _ISOs…" Click="AddPrepared" DockPanel.Dock="Right" Padding="12,7"/>
                     <TextBlock Text="Prepared DVDs" FontSize="20" FontWeight="SemiBold" VerticalAlignment="Center"/>
                   </DockPanel>
                   <TextBlock Text="One ISO = one disc job. Select one to burn; repeat with a new blank disc." Foreground="{StaticResource Muted}" Margin="0,6,0,12"/>
                   <TextBlock x:Name="PreparedListNotice" Text="The list is saved between runs. Removing an entry never deletes its file." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,0,0,8"/>
-                  <ListBox x:Name="PreparedJobs" Height="140" SelectionChanged="PreparedSelected" AutomationProperties.Name="Prepared DVD jobs" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                  </StackPanel>
+                  <ListBox x:Name="PreparedJobs" Grid.Row="1" SelectionChanged="PreparedSelected" AutomationProperties.Name="Prepared DVD jobs" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                     <ListBox.ItemTemplate>
                       <DataTemplate>
                         <StackPanel ToolTip="{Binding Path}">
-                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"/>
+                          <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextWrapping="Wrap"/>
                           <TextBlock Text="{Binding Status}" FontSize="12" Foreground="{StaticResource Muted}"/>
                         </StackPanel>
                       </DataTemplate>
                     </ListBox.ItemTemplate>
                   </ListBox>
-                  <TextBox x:Name="PreparedPath" Text="Add saved ISO files, or prepare one above. Original videos are not needed." IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,8" AutomationProperties.Name="Selected prepared DVD path"/>
+                  <StackPanel Grid.Row="2">
+                  <TextBox x:Name="PreparedPath" Text="Add saved ISO files, or prepare one above. Original videos are not needed." IsReadOnly="True" TextWrapping="Wrap" BorderThickness="0" Background="Transparent" Padding="0,8" MaxHeight="100" VerticalScrollBarVisibility="Auto" AutomationProperties.Name="Selected prepared DVD path"/>
                   <WrapPanel>
                     <Button x:Name="BurnSelectedButton" Content="Burn selected DVD…" Click="BurnPrepared" IsEnabled="False" Margin="0,0,8,0"/>
                     <Button x:Name="RemovePreparedButton" Content="Remove from list" Click="RemovePrepared" IsEnabled="False"/>
                   </WrapPanel>
-                </StackPanel>
-                <StackPanel Width="344" Margin="0,0,0,16">
+                  </StackPanel>
+                </Grid>
+                <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <StackPanel>
                   <Label Content="DVD writer" Target="{Binding ElementName=Drives}" Padding="0" Margin="0,0,0,6"/>
                   <ComboBox x:Name="Drives" DisplayMemberPath="Label" AutomationProperties.Name="DVD writer" SelectionChanged="DriveChanged"/>
                   <WrapPanel Margin="0,8,0,8"><Button Content="Refresh drives" Click="RefreshDrives" Margin="0,0,8,0"/><Button Content="Check disc" Click="CheckDisc"/></WrapPanel>
@@ -180,10 +187,8 @@
                   <TextBlock Text="Blank DVD: checked before burning; no Windows formatting needed. Rewritable DVD: erasure requires separate confirmation and removes all contents. Write-once DVD: use a new blank disc." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
                   <TextBlock Text="One ISO per disc. Every write rechecks readiness and size, asks for confirmation, then finalises and verifies the DVD." FontSize="12" Foreground="{StaticResource Muted}" Margin="0,12,0,0"/>
                 </StackPanel>
-              </WrapPanel>
-            </Border>
-          </StackPanel>
-        </ScrollViewer>
+                </ScrollViewer>
+          </Grid>
       </TabItem>
     </TabControl>
     <Border Grid.Row="2" Background="{StaticResource Surface}" BorderBrush="#B6C5CE" BorderThickness="0,1,0,0" Padding="24,16">

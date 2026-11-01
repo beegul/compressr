@@ -1,4 +1,5 @@
 using Compressr.Core;
+using System.ComponentModel;
 
 internal static class DiscPreparationTests
 {
@@ -135,6 +136,75 @@ internal static class DiscPreparationTests
         catch (InvalidOperationException) { check(true, "concurrent preparation rejected without API call"); }
         release.SetResult();
         check(await first == DiscPreparationResult.Ready, "first operation completes after busy rejection");
+
+        var guard = new GuardedErase(recorded);
+        guard.Exclusive = true;
+        try { guard.Inspect(); throw new Exception("FAIL: fixture must reproduce locked counter access"); }
+        catch (Win32Exception ex) { check(ex.NativeErrorCode == 5, "old counter-after-IMAPI-lock sequence reproduces access denied"); }
+        guard.Exclusive = false;
+        guard.Run();
+        check(guard.Erases == 1 && string.Join(",", guard.Events) ==
+            "prevent,counter,exclusive,locked-media,erase,release,allow",
+            "confirmed erase locks removal, checks exact counter before IMAPI lock and rechecks media under lock");
+        check(!guard.Exclusive && !guard.RemovalLocked, "successful erasure releases exclusive and caller-scoped tray locks");
+        foreach (string failure in new[] { "prevent", "counter", "exclusive", "locked-media", "erase" })
+        {
+            guard = new(recorded) { FailAt = failure };
+            try { guard.Run(); throw new Exception("FAIL: guard failure not surfaced"); }
+            catch (IOException) { check(true, "guard propagates " + failure + " failure"); }
+            check(!guard.Exclusive && !guard.RemovalLocked && guard.Erases == 0,
+                failure + " failure releases any locks and never erases");
+        }
+        guard = new(recorded) { Replacement = recorded with { MediaIdentity = "writer:replacement" } };
+        try { guard.Run(); throw new Exception("FAIL: replaced medium accepted"); }
+        catch (InvalidOperationException) { check(guard.Erases == 0 && !guard.RemovalLocked, "same-state medium swap detected by counter before exclusive access"); }
+        guard = new(recorded) { LockedMedia = recorded.Media with { TotalSectors = 1, FreeSectors = 0 } };
+        try { guard.Run(); throw new Exception("FAIL: locked snapshot change accepted"); }
+        catch (InvalidOperationException) { check(guard.Erases == 0 && !guard.Exclusive && !guard.RemovalLocked, "locked media state/capacity changes abort with cleanup"); }
+        using (var cancellation = new CancellationTokenSource())
+        {
+            guard = new(recorded) { OnLockedRead = cancellation.Cancel };
+            try { guard.Run(cancellation.Token); throw new Exception("FAIL: guard cancellation ignored"); }
+            catch (OperationCanceledException) { check(guard.Erases == 0 && !guard.Exclusive && !guard.RemovalLocked, "cancel after acquiring locks does not erase and releases both locks"); }
+        }
+    }
+
+    private sealed class GuardedErase(DiscInspection approved)
+    {
+        public readonly List<string> Events = [];
+        public bool RemovalLocked, Exclusive;
+        public int Erases;
+        public string? FailAt;
+        public DiscInspection? Replacement;
+        public DvdMedia? LockedMedia;
+        public Action? OnLockedRead;
+        private void Step(string name)
+        {
+            Events.Add(name);
+            if (FailAt == name) throw new IOException("Fixture failure: " + name);
+        }
+        public DiscInspection Inspect()
+        {
+            if (Exclusive) throw new Win32Exception(5, "Cannot inspect DVD media changes.");
+            if (!RemovalLocked) throw new Exception("Counter inspection must be protected against removal.");
+            Step("counter");
+            return Replacement ?? approved;
+        }
+        public void Run(CancellationToken token = default) =>
+            DiscPreparation.EraseConfirmed(approved, 2048,
+                () => { Step("prevent"); RemovalLocked = true; return new Cleanup(() => { Step("allow"); RemovalLocked = false; }); },
+                Inspect,
+                () => { Step("exclusive"); Exclusive = true; return new Cleanup(() => { Step("release"); Exclusive = false; }); },
+                () =>
+                {
+                    if (!Exclusive || !RemovalLocked) throw new Exception("Locked media read must hold both locks.");
+                    Step("locked-media"); OnLockedRead?.Invoke(); return LockedMedia ?? approved.Media;
+                },
+                () => { Step("erase"); Erases++; }, token);
+    }
+    private sealed class Cleanup(Action release) : IDisposable
+    {
+        public void Dispose() => release();
     }
 
     private sealed class FakeDisc(DiscInspection initial)

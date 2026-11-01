@@ -39,6 +39,12 @@ success is shown only when blankness, status and capacity pass. IMAPI erasure
 cannot be cancelled once started: wait for it and its postcheck to finish.
 Failure never starts a burn or silently switches output; a completed erasure
 cannot be undone even if later preparation or burning fails.
+Immediately before confirmed erasure, a caller-scoped tray-removal lock protects
+the media-change counter check. Compressr then acquires IMAPI exclusive access,
+rechecks the actual media state/capacity through that recorder, and erases only
+if both snapshots match the approved disc. This avoids querying a second device
+handle while IMAPI owns the drive (which Windows denies). Both locks are released
+on success or failure; unsupported removal locking stops preparation explicitly.
 
 The **Save to** path is visible before preparing. **Change…** opens the native
 ISO save dialog (or a parent-folder picker for DVD folders); cancelling keeps the
@@ -52,10 +58,14 @@ restarts; files are validated when added and again before burning. **Remove from
 list** never deletes an ISO. Source videos above are concatenated into one DVD;
 prepared ISOs are distinct disc jobs, never concatenated or written as multisession
 data, and the list is not an automatic multi-disc/bulk conversion scheduler.
-Preparation and status remain visible while the content scrolls on smaller screens.
+The source and prepared-job lists expand with the window. DVD settings scroll
+independently on small screens; the main action and operation status stay visible.
+Long clip titles wrap instead of being cut off. Orientation preview/rotation is
+available under **Selected video's orientation** in the settings column.
 YouTube links look up their video titles automatically, using metadata only (no
 video download). Titles replace URLs in **Play order** as they arrive; hover a row
-to see its original link. Move up/down always controls playback order: titles
+to see its original link. Drag clips to control playback order (or select a clip
+and press **Alt+Up / Alt+Down**): titles
 never sort the list. Pending lookups, failures and cancellation appear in the row.
 **Retry title** (or **Check fit**) retries an unavailable title; **Cancel**, removing
 a row, or closing the app stops pending lookups. Successful title/duration results
@@ -207,14 +217,19 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
 
 ## Use
 
-1. Drop one or more files, browse (multi-select supported), or paste an HTTPS
+1. Drop one or more files or HTTPS YouTube links into the source area, browse
+   (multi-select supported), or paste an HTTPS
    YouTube link and click **Add**. Files and links can be mixed. A single
    pending file/link is also added automatically on Preview, Check fit or Prepare DVD,
    preserving the quick single-video workflow. Only download/copy
    content you own or have permission to use; no DRM or login bypass is provided.
-2. Use **Move up**, **Move down** and **Remove** to arrange parts. They play
+2. Drag clips in the queue to arrange parts; an insertion line shows the drop
+   position and the list scrolls when dragging near its top/bottom edge.
+   Keyboard users can select a clip and press **Alt+Up / Alt+Down**. Use **Remove**
+   to remove an entry without deleting its file. Clips play
    in the displayed order, joined into one title with no menu or transition.
-   Select a part, then use **Preview / refresh** and **Rotate right** if needed.
+   Select a part, expand **Selected video's orientation**, then use
+   **Preview / refresh** and **Rotate right** if needed.
    Each part keeps its own manual rotation. The preview uses the
    same padding/rotation geometry as the encode. Metadata rotation is automatic;
    the manual override adds quarter turns. YouTube preview downloads the source
@@ -386,8 +401,10 @@ The PowerShell harness mounts each generated ISO and checks navigation files and
 all VIDEO_TS hashes against the authored tree. It never writes or erases a
 physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
 
-**Save screenshot** captures the running window to
-`%LOCALAPPDATA%\Compressr\screenshot.png` for personal review.
+Native interface regressions cover source-link/file drops, preserved manual
+order/identity/rotation, lookup reuse, compact/maximized queue geometry and
+absence of control overlap. Screenshots are saved only by the development test
+harness when requested; there is no screenshot action in the app.
 
 Short PAL DVD+RW writing and file read-back have been tested on the attached
 GT50N. Older player compatibility, other physical media, near-capacity burns

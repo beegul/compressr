@@ -4,6 +4,8 @@ using System.IO;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Media;
 using Compressr.Core;
@@ -36,6 +38,10 @@ public partial class MainWindow : Window
     private readonly SemaphoreSlim titleSlots = new(2);
     private readonly Func<string, CancellationToken, Task<YouTubeInfo>> metadataLookup;
     private readonly List<string> previewFiles = [];
+    private Point dragOrigin;
+    private SourceVideo? draggedVideo;
+    private QueueDropMarker? dropMarker;
+    private long lastDragScroll;
 
     public MainWindow() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Compressr")) { }
 
@@ -90,6 +96,17 @@ public partial class MainWindow : Window
             path = path.Parent;
         }
         return new(Path.Combine(AppContext.BaseDirectory, "tools"));
+    }
+
+    private void WorkspaceSizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        bool compact = e.NewSize.Height < 760 || e.NewSize.Width < 800;
+        ProductPromise.Visibility = SourceHeading.Visibility = SourceHelp.Visibility =
+            compact ? Visibility.Collapsed : Visibility.Visible;
+        ProductHeader.Padding = new Thickness(24, compact ? 10 : 14, 24, compact ? 10 : 14);
+        SourceEntry.Padding = new Thickness(compact ? 12 : 16);
+        QueueInstructions.Text = compact ? "Drag to reorder · Alt+↑ / Alt+↓ with keyboard." :
+            "Drag clips to set play order · Alt+↑ / Alt+↓ with keyboard. Whole videos are joined; link timestamps are ignored.";
     }
 
     private void SettingChanged(object sender, SelectionChangedEventArgs e)
@@ -424,22 +441,6 @@ public partial class MainWindow : Window
         if (dialog.ShowDialog(this) == true)
             foreach (string file in dialog.FileNames) AddVideo(file);
     }
-    private void SaveScreenshot(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            var content = (FrameworkElement)Content;
-            var bitmap = new RenderTargetBitmap((int)content.ActualWidth, (int)content.ActualHeight, 96, 96, PixelFormats.Pbgra32);
-            bitmap.Render(content);
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(bitmap));
-            string path = Path.Combine(stateDirectory, "screenshot.png");
-            using (var output = File.Create(path)) encoder.Save(output);
-            Status.Text = $"Screenshot saved to {path}";
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
-        { Status.Text = $"Could not save screenshot: {ex.Message}"; }
-    }
     private void SourceChanged(object sender, TextChangedEventArgs e)
     { if (initialized && Source.Text.Length > 0) Estimate.Text = "Input changed. Add it, then Check fit for the combined duration."; }
     private void AddVideo(string input)
@@ -494,8 +495,75 @@ public partial class MainWindow : Window
     private void MoveInput(int delta)
     {
         int index = Inputs.SelectedIndex;
-        if (index < 0 || index + delta < 0 || index + delta >= videos.Count) return;
-        videos.Move(index, index + delta); Inputs.SelectedIndex = index + delta;
+        if (index < 0 || index + delta < 0 || index + delta >= videos.Count || cancellation != null) return;
+        ReorderInput(videos[index], index + delta > index ? index + delta + 1 : index + delta);
+    }
+    private void ReorderInput(SourceVideo item, int insertion)
+    {
+        if (cancellation != null || !videos.Contains(item)) return;
+        int previous = videos.IndexOf(item);
+        int destination = Math.Clamp(insertion, 0, videos.Count);
+        if (destination > previous) destination--;
+        videos.Move(previous, destination);
+        Inputs.SelectedItem = item;
+        Inputs.ScrollIntoView(item);
+        if (Inputs.ItemContainerGenerator.ContainerFromItem(item) is ListBoxItem container) container.Focus();
+        Estimate.Text = "Play order changed. Check fit before making the DVD.";
+    }
+    private void QueueKeyDown(object sender, KeyEventArgs e)
+    {
+        Key key = e.Key == Key.System ? e.SystemKey : e.Key;
+        if (Keyboard.Modifiers != ModifierKeys.Alt || key is not (Key.Up or Key.Down)) return;
+        MoveInput(key == Key.Up ? -1 : 1);
+        e.Handled = true;
+    }
+    private void QueueMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        dragOrigin = e.GetPosition(Inputs);
+        draggedVideo = (ItemsControl.ContainerFromElement(Inputs, e.OriginalSource as DependencyObject) as ListBoxItem)?.DataContext as SourceVideo;
+    }
+    private void QueueMouseMove(object sender, MouseEventArgs e)
+    {
+        if (cancellation != null || draggedVideo == null || e.LeftButton != MouseButtonState.Pressed) return;
+        var point = e.GetPosition(Inputs);
+        if (Math.Abs(point.X - dragOrigin.X) < SystemParameters.MinimumHorizontalDragDistance &&
+            Math.Abs(point.Y - dragOrigin.Y) < SystemParameters.MinimumVerticalDragDistance) return;
+        var item = draggedVideo;
+        draggedVideo = null;
+        try { DragDrop.DoDragDrop(Inputs, new DataObject(typeof(SourceVideo), item), DragDropEffects.Move); }
+        finally { ClearDropMarker(); }
+    }
+    private int QueueInsertion(Point point, SourceVideo dragged, out double markerY)
+    {
+        markerY = 2;
+        for (int i = 0; i < videos.Count; i++)
+        {
+            if (Inputs.ItemContainerGenerator.ContainerFromIndex(i) is not ListBoxItem row) continue;
+            double top = row.TranslatePoint(new Point(), Inputs).Y;
+            if (point.Y < top) { markerY = top; return i; }
+            if (point.Y <= top + row.ActualHeight)
+            {
+                bool after = i >= videos.IndexOf(dragged);
+                markerY = after ? top + row.ActualHeight : top;
+                return after ? i + 1 : i;
+            }
+            markerY = top + row.ActualHeight;
+        }
+        return videos.Count;
+    }
+    private void ClearDropMarker()
+    {
+        if (dropMarker == null) return;
+        AdornerLayer.GetAdornerLayer(Inputs)?.Remove(dropMarker);
+        dropMarker = null;
+    }
+    private void QueueDragLeave(object sender, DragEventArgs e) => ClearDropMarker();
+
+    private sealed class QueueDropMarker(UIElement owner) : Adorner(owner)
+    {
+        public double Y { get; set; }
+        protected override void OnRender(DrawingContext drawingContext) =>
+            drawingContext.DrawLine(new Pen((Brush)FindResource("Accent"), 3), new(2, Y), new(ActualWidth - 2, Y));
     }
     private void RemoveInput(object sender, RoutedEventArgs e)
     {
@@ -505,13 +573,88 @@ public partial class MainWindow : Window
         videos.RemoveAt(index); Inputs.SelectedIndex = Math.Min(index, videos.Count - 1);
         Estimate.Text = "List changed. Check fit for the updated duration.";
     }
+    private IReadOnlyList<string> DroppedSources(IDataObject data)
+    {
+        if (data.GetDataPresent(DataFormats.FileDrop) && data.GetData(DataFormats.FileDrop) is string[] files)
+        {
+            if (files.Length == 0 || files.Any(file => !File.Exists(file)))
+                throw new ArgumentException("Drop existing video files, not folders or missing files.");
+            return files;
+        }
+        foreach (string format in new[] { "UniformResourceLocatorW", "UniformResourceLocator", "text/uri-list", DataFormats.UnicodeText, DataFormats.Text })
+        {
+            if (!data.GetDataPresent(format)) continue;
+            object? value = data.GetData(format);
+            string? text = value as string;
+            if (value is MemoryStream stream)
+            {
+                var bytes = stream.ToArray();
+                text = (format.EndsWith('W') ? System.Text.Encoding.Unicode : System.Text.Encoding.UTF8).GetString(bytes);
+            }
+            if (!string.IsNullOrWhiteSpace(text)) return SourceDrop.ParseLinks(text);
+        }
+        throw new ArgumentException("Drop video files or HTTPS YouTube video links.");
+    }
     private void OnDragOver(object sender, DragEventArgs e)
-    { e.Effects = cancellation == null && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; }
+    {
+        e.Effects = DragDropEffects.None;
+        e.Handled = true;
+        if (cancellation != null || WorkspaceTabs.SelectedIndex != 0) { ClearDropMarker(); return; }
+        if (e.Data.GetDataPresent(typeof(SourceVideo)))
+        {
+            var point = e.GetPosition(Inputs);
+            if (point.X < 0 || point.X > Inputs.ActualWidth || point.Y < 0 || point.Y > Inputs.ActualHeight)
+            { ClearDropMarker(); return; }
+            if (e.Data.GetData(typeof(SourceVideo)) is not SourceVideo item || !videos.Contains(item)) return;
+            e.Effects = DragDropEffects.Move;
+            if (Environment.TickCount64 - lastDragScroll > 120 && FindChild<ScrollViewer>(Inputs) is { } scroll)
+            {
+                if (point.Y < 28) scroll.LineUp();
+                else if (point.Y > Inputs.ActualHeight - 28) scroll.LineDown();
+                lastDragScroll = Environment.TickCount64;
+            }
+            QueueInsertion(point, item, out double y);
+            if (dropMarker == null && AdornerLayer.GetAdornerLayer(Inputs) is { } layer)
+            {
+                dropMarker = new(Inputs) { IsHitTestVisible = false };
+                layer.Add(dropMarker);
+            }
+            if (dropMarker != null) { dropMarker.Y = y; dropMarker.InvalidateVisual(); }
+            return;
+        }
+        ClearDropMarker();
+        try { _ = DroppedSources(e.Data); e.Effects = DragDropEffects.Copy; }
+        catch (ArgumentException) { /* Drop reports the validation error; drag only advertises supported data. */ }
+    }
     private void OnDrop(object sender, DragEventArgs e)
     {
-        if (cancellation != null) return;
-        if (e.Data.GetData(DataFormats.FileDrop) is string[] files)
-            foreach (var file in files) AddVideo(file);
+        e.Handled = true;
+        ClearDropMarker();
+        if (cancellation != null || WorkspaceTabs.SelectedIndex != 0) { e.Effects = DragDropEffects.None; return; }
+        if (e.Data.GetDataPresent(typeof(SourceVideo)))
+        {
+            var point = e.GetPosition(Inputs);
+            if (point.X >= 0 && point.X <= Inputs.ActualWidth && point.Y >= 0 && point.Y <= Inputs.ActualHeight &&
+                e.Data.GetData(typeof(SourceVideo)) is SourceVideo item)
+                ReorderInput(item, QueueInsertion(point, item, out _));
+            return;
+        }
+        try
+        {
+            foreach (string input in DroppedSources(e.Data)) AddVideo(input);
+            Status.Text = "Sources added in drop order. Drag clips to change DVD playback order.";
+        }
+        catch (ArgumentException ex) { e.Effects = DragDropEffects.None; Status.Text = ex.Message; }
+    }
+    private static T? FindChild<T>(DependencyObject parent) where T : DependencyObject
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            if (child is T found) return found;
+            if (FindChild<T>(child) is { } descendant) return descendant;
+        }
+        return null;
     }
     private IProgress<StageProgress> Reporter() => new Progress<StageProgress>(p =>
     { Stage.Text = p.Stage; Status.Text = p.Detail; Progress.IsIndeterminate = p.Fraction == null; Progress.Value = (p.Fraction ?? 0) * 100; });

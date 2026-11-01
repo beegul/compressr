@@ -110,47 +110,95 @@ public static class DiscWriter
     public static void Erase(DvdDrive drive, DiscInspection approved, long requiredBytes, CancellationToken token)
     {
         object? recorderObject = null, dataObject = null, eraseObject = null;
-        bool locked = false;
         try
         {
             token.ThrowIfCancellationRequested();
             dynamic recorder = recorderObject = Com("IMAPI2.MsftDiscRecorder2");
             recorder.InitializeDiscRecorder(drive.Id);
             CheckAvailable(recorder);
-            recorder.AcquireExclusiveAccess(true, "Compressr");
-            locked = true;
             dynamic data = dataObject = Com("IMAPI2.MsftDiscFormat2Data");
             data.Recorder = recorder;
             dynamic erase = eraseObject = Com("IMAPI2.MsftDiscFormat2Erase");
             erase.Recorder = recorder;
             erase.ClientName = "Compressr";
             erase.FullErase = false;
-            bool supported = (bool)erase.IsRecorderSupported(recorder) && (bool)erase.IsCurrentMediaSupported(recorder);
-            var current = new DiscInspection(ReadMedia(recorder, data), supported, MediaIdentity(drive));
-            approved.CheckUnchanged(current, requiredBytes);
-            token.ThrowIfCancellationRequested();
-            // IMAPI chooses the appropriate DVD+RW overwrite / DVD-RW erase operation.
-            // EraseMedia is synchronous and exposes no cancellation API.
-            erase.EraseMedia();
+            DiscPreparation.EraseConfirmed(approved, requiredBytes,
+                () => new MediaRemovalLock(drive),
+                () => new DiscInspection(ReadMedia(recorder, data),
+                    (bool)erase.IsRecorderSupported(recorder) && (bool)erase.IsCurrentMediaSupported(recorder), MediaIdentity(drive)),
+                () =>
+                {
+                    recorder.AcquireExclusiveAccess(true, "Compressr");
+                    return new ExclusiveLock(recorderObject!);
+                },
+                () => ReadMedia(recorder, data),
+                () => erase.EraseMedia(), token);
         }
         finally
         {
-            try { if (locked) ((dynamic)recorderObject!).ReleaseExclusiveAccess(); }
-            finally { Release(eraseObject); Release(dataObject); Release(recorderObject); }
+            Release(eraseObject); Release(dataObject); Release(recorderObject);
         }
     }
 
-    private static string MediaIdentity(DvdDrive drive)
+    private static string DevicePath(DvdDrive drive)
     {
         string root = Path.GetPathRoot(drive.Mount) ?? "";
         if (root.Length < 2 || root[1] != ':')
             throw new IOException("Media-change detection requires a drive-letter mount. Use another writer or a new blank DVD.");
-        using var handle = CreateFile(@"\\.\" + root[..2], 0x80000000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
-        if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot inspect DVD media changes.");
+        return @"\\.\" + root[..2];
+    }
+    private static Win32Exception DeviceError(DvdDrive drive, string action)
+    {
+        int error = Marshal.GetLastWin32Error();
+        return new(error, $"{action} ({drive.Label}): {new Win32Exception(error).Message} (Windows error {error}). Check disc again.");
+    }
+    private static string MediaIdentity(DvdDrive drive)
+    {
+        using var handle = CreateFile(DevicePath(drive), 0x80000000, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+        if (handle.IsInvalid) throw DeviceError(drive, "Cannot open the DVD for media-change inspection");
         if (!DeviceIoControl(handle, 0x2D4800, IntPtr.Zero, 0, out uint changes, 4, out uint bytes, IntPtr.Zero))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Cannot inspect DVD media changes.");
+            throw DeviceError(drive, "Cannot inspect DVD media changes");
         if (bytes != 4) throw new IOException("The writer did not supply a media-change counter. Erasure is unavailable.");
         return $"{drive.Id}:{changes}";
+    }
+
+    private sealed class ExclusiveLock(object recorder) : IDisposable
+    {
+        public void Dispose() => ((dynamic)recorder).ReleaseExclusiveAccess();
+    }
+
+    private sealed class MediaRemovalLock : IDisposable
+    {
+        private readonly SafeFileHandle handle;
+        private readonly DvdDrive drive;
+        public MediaRemovalLock(DvdDrive drive)
+        {
+            this.drive = drive;
+            handle = CreateFile(DevicePath(drive), 0x80, 7, IntPtr.Zero, 3, 0, IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                var error = DeviceError(drive, "Cannot lock DVD removal for safe preparation");
+                handle.Dispose();
+                throw error;
+            }
+            if (!SetRemoval(1))
+            {
+                var error = DeviceError(drive, "Cannot prevent DVD removal for safe preparation");
+                handle.Dispose();
+                throw error;
+            }
+        }
+        private bool SetRemoval(byte prevent) =>
+            // Caller-scoped IOCTL_STORAGE_EJECTION_CONTROL also releases on process exit.
+            DeviceIoControlRemoval(handle, 0x2D0940, [prevent], 1, IntPtr.Zero, 0, out _, IntPtr.Zero);
+        public void Dispose()
+        {
+            try
+            {
+                if (!SetRemoval(0)) throw DeviceError(drive, "Cannot release the DVD removal lock");
+            }
+            finally { handle.Dispose(); }
+        }
     }
 
     public static void Burn(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress)
@@ -195,4 +243,9 @@ public static class DiscWriter
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeviceIoControl(SafeFileHandle device, uint code, IntPtr input, uint inputSize,
         out uint output, uint outputSize, out uint returned, IntPtr overlapped);
+
+    [DllImport("kernel32.dll", EntryPoint = "DeviceIoControl", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool DeviceIoControlRemoval(SafeFileHandle device, uint code, byte[] input, uint inputSize,
+        IntPtr output, uint outputSize, out uint returned, IntPtr overlapped);
 }

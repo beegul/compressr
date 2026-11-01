@@ -63,5 +63,13 @@ internal static class SourceVideoTests
         catch (InvalidDataException) { }
         check(invalidTitle.Metadata == null && invalidTitle.TitleStatus.Contains("did not provide"),
             "missing title is an explicit failure rather than a misleading successful label");
+        var dropped = SourceDrop.ParseLinks("# browser URI list\r\nhttps://youtu.be/second\r\nhttps://www.youtube.com/watch?v=first&t=30\0");
+        check(dropped.SequenceEqual(new[] { "https://youtu.be/second", "https://www.youtube.com/watch?v=first&t=30" }),
+            "dropped link list preserves exact URLs and supplied order");
+        foreach (string invalid in new[] { "https://example.com/video", "https://youtube.com.evil.example/watch?v=x", "http://youtu.be/first", "", "https://youtu.be/good\nbad" })
+        {
+            try { SourceDrop.ParseLinks(invalid); check(false, "invalid dropped link rejected"); }
+            catch (ArgumentException) { check(true, "invalid link list rejected atomically"); }
+        }
     }
 }
