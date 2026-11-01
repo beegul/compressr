@@ -191,6 +191,7 @@ Check(selection.Selected == OutputKind.Iso && !selection.IsManual, "user can res
 Throws<ArgumentOutOfRangeException>(() => selection.Choose((OutputKind)99), "invalid output selection");
 Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
 await DiscPreparationTests.RunAsync(Check);
+PreparedImageDestinationTests.Run(Check);
 Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
 await ReliabilityTests.RunProcessAsync(Check);
 await SourceVideoTests.RunAsync(Check);

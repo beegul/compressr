@@ -36,6 +36,7 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, (long Length, DateTime Modified, VideoInfo Info)> probeCache = new(StringComparer.OrdinalIgnoreCase);
     private string isoDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Compressr.iso");
     private string folderDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}");
+    private sealed record DestinationSettings(string? Iso, string? Folder);
     private sealed record PreparedJob(string Path, string Status)
     {
         public string Name => System.IO.Path.GetFileName(Path);
@@ -48,6 +49,9 @@ public partial class MainWindow : Window
     private readonly Func<string, CancellationToken, Task<YouTubeInfo>> metadataLookup;
     private readonly Func<IReadOnlyList<DvdDrive>> enumerateDrives;
     private readonly Func<DvdDrive, DiscInspection> inspectDisc;
+    private readonly Func<PreparedDvd, DvdDrive, IProgress<StageProgress>, CancellationToken, Task>? writeDisc;
+    private readonly Func<PreparedDvd, DvdDrive, IProgress<StageProgress>, CancellationToken, Task>? verifyDisc;
+    private readonly Func<PreparedDvd, DvdDrive, bool>? confirmBurn;
     private readonly List<string> previewFiles = [];
     private Point dragOrigin;
     private SourceVideo? draggedVideo;
@@ -63,11 +67,21 @@ public partial class MainWindow : Window
 
     internal MainWindow(string stateDirectory, Func<string, CancellationToken, Task<YouTubeInfo>>? metadataLookup,
         Func<IReadOnlyList<DvdDrive>> enumerateDrives, Func<DvdDrive, DiscInspection> inspectDisc)
+        : this(stateDirectory, metadataLookup, enumerateDrives, inspectDisc, null, null, null) { }
+
+    internal MainWindow(string stateDirectory, Func<string, CancellationToken, Task<YouTubeInfo>>? metadataLookup,
+        Func<IReadOnlyList<DvdDrive>> enumerateDrives, Func<DvdDrive, DiscInspection> inspectDisc,
+        Func<PreparedDvd, DvdDrive, IProgress<StageProgress>, CancellationToken, Task>? writeDisc,
+        Func<PreparedDvd, DvdDrive, IProgress<StageProgress>, CancellationToken, Task>? verifyDisc,
+        Func<PreparedDvd, DvdDrive, bool>? confirmBurn)
     {
         this.stateDirectory = stateDirectory;
         this.metadataLookup = metadataLookup ?? LookupMetadataAsync;
         this.enumerateDrives = enumerateDrives;
         this.inspectDisc = inspectDisc;
+        this.writeDisc = writeDisc;
+        this.verifyDisc = verifyDisc;
+        this.confirmBurn = confirmBurn;
         InitializeComponent();
         Inputs.ItemsSource = videos;
         videos.CollectionChanged += (_, _) =>
@@ -88,6 +102,7 @@ public partial class MainWindow : Window
         Capacity.SelectedItem = DiscSize.SingleLayer;
         Output.SelectedIndex = 0;
         Directory.CreateDirectory(stateDirectory);
+        LoadDestinationSettings();
         try
         {
             string settings = Path.Combine(stateDirectory, "settings.json");
@@ -290,8 +305,20 @@ public partial class MainWindow : Window
         updatingOutput = true;
         try { Output.SelectedIndex = outputSelection.Selected switch { OutputKind.Folder => 1, OutputKind.Burn => 2, _ => 0 }; }
         finally { updatingOutput = false; }
-        SaveOptions.Visibility = outputSelection.Selected == OutputKind.Burn ? Visibility.Collapsed : Visibility.Visible;
+        SaveOptions.Visibility = Visibility.Visible;
         SavePath.Text = outputSelection.Selected == OutputKind.Folder ? folderDestination : isoDestination;
+        SaveLabel.Text = outputSelection.Selected switch
+        {
+            OutputKind.Burn => "Keep retryable DVD-ready ISO at",
+            OutputKind.Folder => "Save DVD folder to",
+            _ => "Save DVD-ready ISO to"
+        };
+        DestinationHint.Text = outputSelection.Selected switch
+        {
+            OutputKind.Burn => "A verified ISO is saved here and added to Burn prepared DVDs before writing. If a burn fails, select it there to retry.",
+            OutputKind.Folder => "Folder output is retained here. Choose ISO output to save a burn-ready image for later.",
+            _ => "A verified ISO is added to Burn prepared DVDs so it can be burned later."
+        };
         OutputChoiceHint.Text = outputSelection.IsManual ? "Your choice is kept until you use automatic." :
             "Automatic: use a blank or safely erasable DVD; otherwise save an ISO. Erasure always asks permission.";
         UpdatePrimaryAction();
@@ -302,21 +329,101 @@ public partial class MainWindow : Window
         "_Make DVD";
     private bool SelectDestination()
     {
+        string iso = isoDestination;
+        string folder = folderDestination;
         if (outputSelection.Selected == OutputKind.Folder)
         {
             var dialog = new OpenFolderDialog { Title = "Choose a parent folder for a new DVD folder", InitialDirectory = Path.GetDirectoryName(folderDestination) };
             if (dialog.ShowDialog(this) != true) return false;
-            folderDestination = Path.Combine(dialog.FolderName, $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}");
+            folder = Path.Combine(dialog.FolderName, $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..6]}");
         }
         else
         {
-            var dialog = new SaveFileDialog { Title = "Save DVD-ready ISO", Filter = "DVD image|*.iso", DefaultExt = ".iso",
-                AddExtension = true, FileName = Path.GetFileName(isoDestination), InitialDirectory = Path.GetDirectoryName(isoDestination), OverwritePrompt = true };
+            var dialog = new SaveFileDialog
+            {
+                Title = outputSelection.Selected == OutputKind.Burn ? "Choose where to keep the retryable DVD-ready ISO" : "Save DVD-ready ISO",
+                Filter = "DVD image|*.iso", DefaultExt = ".iso", AddExtension = true,
+                FileName = Path.GetFileName(isoDestination), InitialDirectory = Path.GetDirectoryName(isoDestination), OverwritePrompt = true
+            };
             if (dialog.ShowDialog(this) != true) return false;
-            isoDestination = dialog.FileName;
+            iso = dialog.FileName;
         }
+        PersistDestinations(iso, folder);
         UpdateOutput();
         return true;
+    }
+
+    private static string NormalizeDestination(string path, string extension)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException("A saved DVD destination must be an absolute path.");
+        string fullPath = Path.GetFullPath(path);
+        if (!string.Equals(Path.GetExtension(fullPath), extension, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"A saved DVD destination must use the {extension} extension.");
+        return fullPath;
+    }
+
+    private static string NormalizeFolderDestination(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path))
+            throw new InvalidDataException("A saved DVD folder destination must be an absolute path.");
+        return Path.GetFullPath(path);
+    }
+
+    private void LoadDestinationSettings()
+    {
+        string path = Path.Combine(stateDirectory, "dvd-destinations.json");
+        if (!File.Exists(path)) return;
+        try
+        {
+            var saved = JsonSerializer.Deserialize<DestinationSettings>(File.ReadAllText(path))
+                ?? throw new InvalidDataException("Saved DVD destinations are empty.");
+            string iso = NormalizeDestination(saved.Iso ?? "", ".iso");
+            string folder = NormalizeFolderDestination(saved.Folder ?? "");
+            isoDestination = iso;
+            folderDestination = folder;
+        }
+        catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
+        {
+            Status.Text = $"Could not read saved DVD destinations: {ex.Message}";
+        }
+    }
+
+    private void PersistDestinations(string iso, string folder)
+    {
+        iso = NormalizeDestination(iso, ".iso");
+        folder = NormalizeFolderDestination(folder);
+        string path = Path.Combine(stateDirectory, "dvd-destinations.json");
+        string pending = path + $".{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllText(pending, JsonSerializer.Serialize(new DestinationSettings(iso, folder)));
+            File.Move(pending, path, true);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            if (File.Exists(pending))
+            {
+                try { File.Delete(pending); }
+                catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+                { System.Diagnostics.Trace.TraceWarning($"Could not remove temporary destination settings {pending}: {cleanup.Message}"); }
+            }
+            throw new IOException($"Could not save the DVD destination settings. The previous location is unchanged. {ex.Message}", ex);
+        }
+        isoDestination = iso;
+        folderDestination = folder;
+    }
+
+    private void SetIsoDestination(string path)
+    {
+        PersistDestinations(path, folderDestination);
+        UpdateOutput();
+    }
+
+    private void SetFolderDestination(string path)
+    {
+        PersistDestinations(isoDestination, path);
+        UpdateOutput();
     }
     private void ChooseDestination(object sender, RoutedEventArgs e)
     {
@@ -342,20 +449,30 @@ public partial class MainWindow : Window
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or ArgumentException)
         { PreparedListNotice.Text = $"Could not load prepared DVD list: {ex.Message}"; }
     }
-    private void SavePreparedJobs()
+    private void SavePreparedJobs(bool requireDurable = false)
     {
+        string path = Path.Combine(stateDirectory, "prepared-jobs.json");
+        string pending = path + $".{Guid.NewGuid():N}.tmp";
         try
         {
-            string path = Path.Combine(stateDirectory, "prepared-jobs.json");
-            string pending = path + ".tmp";
             File.WriteAllText(pending, JsonSerializer.Serialize(preparedJobs.Select(j => j.Path)));
             File.Move(pending, path, true);
             PreparedListNotice.Text = "The list is saved between runs. Removing an entry never deletes its file.";
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        { PreparedListNotice.Text = $"Could not save prepared DVD list: {ex.Message} Entries are available only in this run."; }
+        {
+            if (File.Exists(pending))
+            {
+                try { File.Delete(pending); }
+                catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+                { System.Diagnostics.Trace.TraceWarning($"Could not remove temporary prepared-list file {pending}: {cleanup.Message}"); }
+            }
+            PreparedListNotice.Text = $"Could not save prepared DVD list: {ex.Message} Entries are available only in this run.";
+            if (requireDurable)
+                throw new IOException($"Could not persist the prepared ISO in the retry list. No disc was written. {ex.Message}", ex);
+        }
     }
-    private PreparedJob AddPreparedJob(string path, string status)
+    private PreparedJob AddPreparedJob(string path, string status, bool requireDurable = false)
     {
         path = Path.GetFullPath(path);
         var existing = preparedJobs.FirstOrDefault(j => string.Equals(j.Path, path, StringComparison.OrdinalIgnoreCase));
@@ -363,7 +480,7 @@ public partial class MainWindow : Window
         if (existing == null) preparedJobs.Add(job);
         else preparedJobs[preparedJobs.IndexOf(existing)] = job;
         PreparedJobs.SelectedItem = job;
-        SavePreparedJobs();
+        SavePreparedJobs(requireDurable);
         return job;
     }
     private void SetPreparedStatus(string path, string status)
@@ -819,6 +936,9 @@ public partial class MainWindow : Window
         string destination = isoDestination;
         string work = Path.Combine(stateDirectory, "jobs", Guid.NewGuid().ToString("N"));
         string? partialIso = null;
+        PreparedImageDestinationSnapshot? imageDestination = null;
+        bool imageCommitted = false;
+        bool retryJobRegistered = false;
         try
         {
             var token = cancellation.Token; var reporter = Reporter(); var tools = Tools();
@@ -829,24 +949,28 @@ public partial class MainWindow : Window
                 throw new IOException(readiness.Detail + " Nothing was started. Choose file output explicitly to save without a disc.");
             output = outputSelection.Selected;
             DvdDrive? drive = Drives.SelectedItem as DvdDrive;
-            if (output == OutputKind.Iso && File.Exists(isoDestination) && !SelectDestination()) return;
-            destination = output == OutputKind.Burn ? Path.Combine(work, "prepared.iso") :
-                output == OutputKind.Folder ? folderDestination : isoDestination;
-            var existing = output == OutputKind.Iso && File.Exists(destination) ? new FileInfo(destination) : null;
-            long? originalLength = existing?.Length;
-            DateTime? originalModified = existing?.LastWriteTimeUtc;
+            if (output is OutputKind.Iso or OutputKind.Burn && File.Exists(isoDestination) && !SelectDestination()) return;
+            destination = output == OutputKind.Folder ? folderDestination : isoDestination;
+            if (output == OutputKind.Folder && Directory.Exists(destination))
+                throw new IOException("The DVD output folder already exists. Change the save location to create a new DVD folder.");
             var estimate = await EstimateAsync(tools, videos.ToArray(), token);
             long? available = AvailableCapacityBytes();
+            var displayedEstimate = DvdCapacityEstimate.Create(estimate, (TelevisionSystem)Standard.SelectedItem,
+                (DiscSize)Capacity.SelectedItem, available);
             var estimatedPlan = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0, available);
             ShowCapacity(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, available);
+            if (output != OutputKind.Folder)
+            {
+                long estimateBytes = checked((long)Math.Ceiling(displayedEstimate.EstimatedBytes));
+                imageDestination = PreparedImageDestination.Inspect(destination, estimateBytes);
+                destination = imageDestination.Path;
+            }
             if (output == OutputKind.Burn)
             {
                 if (drive == null) throw new InvalidOperationException("No DVD writer selected. Connect a writer, or explicitly choose Save DVD-ready ISO.");
                 if (!await PreflightDiscAsync(drive, estimatedPlan.Capacity / 2048 * 2048, token)) return;
                 token.ThrowIfCancellationRequested();
             }
-            if (output == OutputKind.Folder && Directory.Exists(destination))
-                throw new IOException("The DVD output folder already exists. Change the save location to create a new DVD folder.");
             var clips = new List<VideoClip>();
             foreach (var item in videos)
             {
@@ -877,18 +1001,18 @@ public partial class MainWindow : Window
             else
             {
                 partialIso = destination + $".{Guid.NewGuid():N}.partial";
+                if (File.Exists(partialIso))
+                    throw new IOException("A temporary image already exists at the chosen destination. Choose another filename.");
                 await tools.CreateIsoAsync(dvd, partialIso, plan, reporter, token);
                 using (var prepared = await PreparedDvd.OpenAsync(partialIso, reporter, token))
                     await prepared.VerifyDirectoryAsync(Path.Combine(dvd, "VIDEO_TS"), reporter, token);
                 token.ThrowIfCancellationRequested();
-                if (originalLength != null)
-                {
-                    var current = new FileInfo(destination);
-                    if (!current.Exists || current.Length != originalLength || current.LastWriteTimeUtc != originalModified)
-                        throw new IOException("The destination ISO changed during preparation. It was not overwritten. Choose another filename and prepare again.");
-                }
-                File.Move(partialIso, destination, originalLength != null); partialIso = null;
-                AddPreparedJob(destination, "Verified ISO · not written");
+                PreparedImageDestination.Commit(partialIso, imageDestination
+                    ?? throw new InvalidOperationException("The ISO destination was not preflighted."));
+                partialIso = null;
+                imageCommitted = true;
+                AddPreparedJob(destination, "Verified ISO · not written", requireDurable: true);
+                retryJobRegistered = true;
                 if (output == OutputKind.Burn)
                 {
                     await BurnIsoAsync(destination, drive, token);
@@ -903,14 +1027,22 @@ public partial class MainWindow : Window
         catch (OperationCanceledException)
         {
             Stage.Text = "Cancelled";
-            Status.Text = $"No disc was written. Work files retained at {work}. Output choice unchanged." +
+            Status.Text = imageCommitted && retryJobRegistered
+                ? "Cancelled before writing. The prepared ISO is still at the selected Save to location and in Burn prepared DVDs.\nSelect it there to retry without downloading or converting again."
+                : imageCommitted
+                    ? $"Cancelled before writing. The verified ISO remains at {destination}, but its retry-list entry was not persisted. No burn was attempted; add the ISO from Burn prepared DVDs."
+                    : $"No disc was written. Work files retained at {work}. Output choice unchanged." +
                 (output == OutputKind.Folder ? $"\nAny partially saved folder at {destination} is not a complete DVD." : "");
             SetPreparedStatus(destination, "Cancelled · not written");
         }
         catch (Exception ex)
         {
             Stage.Text = burning ? "Disc not verified" : "Could not complete DVD";
-            Status.Text = $"{ex.Message}\nWork files retained at {work}. Output choice unchanged; no automatic file fallback." +
+            Status.Text = imageCommitted && retryJobRegistered
+                ? $"{ex.Message}\nVerified ISO kept at the selected Save to location and in Burn prepared DVDs.\nSelect it there to retry without downloading or converting again. No automatic retry or fallback."
+                : imageCommitted
+                    ? $"{ex.Message}\nVerified ISO remains at {destination}, but its retry-list entry was not persisted. No burn was attempted; add the ISO from Burn prepared DVDs."
+                    : $"{ex.Message}\nWork files retained at {work}. Output choice unchanged; no automatic file fallback." +
                 (output == OutputKind.Folder ? $"\nAny partially saved folder at {destination} is not a complete DVD." : "");
             SetPreparedStatus(destination, burning ? "Write / verification failed; disc not verified" : $"Not written: {ex.Message}");
         }
@@ -953,8 +1085,10 @@ public partial class MainWindow : Window
         if (!await PreflightDiscAsync(drive, prepared.Length, token))
         { SetPreparedStatus(path, "Preparation declined · not written"); return; }
         token.ThrowIfCancellationRequested();
-        if (MessageBox.Show(this, $"Write and finalise {Path.GetFileName(prepared.Path)} ({prepared.Length / 1_000_000.0:F1} MB) to {drive.Label}?\nOne ISO will be written to one disc. This cannot be undone. Disc preflight has passed; this write will not erase existing contents.",
-            "Confirm DVD burning", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) != MessageBoxResult.Yes)
+        bool approved = confirmBurn?.Invoke(prepared, drive) ?? MessageBox.Show(this,
+            $"Write and finalise {Path.GetFileName(prepared.Path)} ({prepared.Length / 1_000_000.0:F1} MB) to {drive.Label}?\nOne ISO will be written to one disc. This cannot be undone. Disc preflight has passed; this write will not erase existing contents.",
+            "Confirm DVD burning", MessageBoxButton.YesNo, MessageBoxImage.Warning, MessageBoxResult.No) == MessageBoxResult.Yes;
+        if (!approved)
         {
             Stage.Text = "Not written"; Status.Text = $"Burn declined. The prepared ISO is unchanged at {path}. Output choice unchanged.";
             SetPreparedStatus(path, "Burn declined · not written"); return;
@@ -962,8 +1096,10 @@ public partial class MainWindow : Window
         token.ThrowIfCancellationRequested();
         burning = true; CancelButton.IsEnabled = false;
         SetPreparedStatus(path, "Writing / verifying · cannot cancel");
-        await RunStaAsync(() => DiscWriter.Burn(prepared, drive, reporter));
-        await DiscWriter.VerifyAsync(prepared, drive, reporter);
+        if (writeDisc != null) await writeDisc(prepared, drive, reporter, token);
+        else await RunStaAsync(() => DiscWriter.Burn(prepared, drive, reporter));
+        if (verifyDisc != null) await verifyDisc(prepared, drive, reporter, token);
+        else await DiscWriter.VerifyAsync(prepared, drive, reporter);
         Stage.Text = "Done"; Progress.Value = 100;
         Status.Text = "One DVD burned, finalised and verified by SHA-256 read-back. Insert a new blank disc, then select another prepared ISO to repeat.";
         SetPreparedStatus(path, "Burned and verified this run");

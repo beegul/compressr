@@ -48,10 +48,21 @@ if both snapshots match the approved disc. This avoids querying a second device
 handle while IMAPI owns the drive (which Windows denies). Both locks are released
 on success or failure; unsupported removal locking stops preparation explicitly.
 
-The **Save to** path is visible before preparing. **Change…** opens the native
-ISO save dialog (or a parent-folder picker for DVD folders); cancelling keeps the
-previous path. Existing ISO replacement requires the native overwrite confirmation.
-Preparation does not silently switch to saving after a declined or failed burn.
+The **Save to** path is visible before preparing. For both **Save DVD-ready ISO**
+and **Prepare and burn DVD**, **Change…** opens the native ISO save dialog; the
+DVD folder choice uses a parent-folder picker. The selected ISO and folder
+destinations are saved between app runs. For direct burning, the app first writes
+and verifies a self-contained ISO at the displayed path, then adds it to
+**Burn prepared DVDs** before asking to write the disc. If the burn is declined,
+cancelled, fails, or cannot be verified, keep that ISO and select it from the
+prepared list to retry without downloading or converting the sources again.
+Retrying never writes automatically; it repeats normal media checks and asks for
+burn confirmation. Existing ISO replacement requires the native overwrite
+confirmation at the start of each preparation, and the destination is checked
+again before atomic replacement. Missing folders, unavailable volumes and
+insufficient free space stop before disc preparation or conversion; incomplete
+images are never registered as prepared jobs. Cancelling either save dialog keeps
+the previous destination.
 
 Each successful ISO preparation is added to **Prepared DVDs**. Add multiple
 existing ISOs with **Add prepared ISOs…**, then select **one** and burn it to **one**
@@ -102,7 +113,12 @@ Saved ISOs also reopen and verify independently of original source/job folders.
 Focused/integration checks cover image rejection, capacity boundaries, image
 locking and read-back corruption. Native WPF regressions also exercise automatic
 capacity updates, pending/failed/stale metadata, actual-media budgets, retained
-manual output choices and unified Make DVD file/preflight transitions. Destructive
+manual output choices and unified Make DVD file/preflight transitions. Destination
+tests cover custom paths, free-space and write-access checks, raced overwrites,
+atomic replacement and settings/list persistence. Fake recorder callbacks
+exercise a direct-burn image registered before writing, then simulated write,
+cancellation and read-back failures with the ISO still selectable after restart.
+Destructive
 preparation branches are tested with typed fakes, not physical erasures.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. One user-authorized physical DVD+RW burn on an

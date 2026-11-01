@@ -15,6 +15,9 @@ Add-Type -CompilerOptions '/nowarn:1701' -ReferencedAssemblies @(
     'System.Runtime', 'System.Collections') -TypeDefinition @'
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 using Compressr.App;
 using Compressr.Core;
 public static class DiscMonitorFixture
@@ -23,6 +26,12 @@ public static class DiscMonitorFixture
     public static DiscInspection Snapshot;
     public static int Inspections;
     public static string Failure;
+    public static string StateDirectory;
+    public static string WriteBehavior = "fail";
+    public static string VerifyBehavior = "pass";
+    public static int Writes;
+    public static int Verifications;
+    public static bool RegisteredBeforeWrite;
     public static Func<IReadOnlyList<DvdDrive>> Enumerate => () => Drives;
     public static Func<DvdDrive, DiscInspection> Inspect => drive =>
     {
@@ -31,6 +40,28 @@ public static class DiscMonitorFixture
             string.IsNullOrEmpty(Failure) ? "Unavailable test recorder" : Failure);
         return Snapshot;
     };
+    public static Task Write(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress, CancellationToken token)
+    {
+        Writes++;
+        string catalog = System.IO.Path.Combine(StateDirectory, "prepared-jobs.json");
+        string paths = File.ReadAllText(catalog);
+        string persistedPath = System.IO.Path.GetFullPath(dvd.Path).Replace("\\", "\\\\");
+        RegisteredBeforeWrite = File.Exists(dvd.Path) && paths.Contains(persistedPath, StringComparison.OrdinalIgnoreCase);
+        return WriteBehavior switch
+        {
+            "cancel" => Task.FromCanceled(new CancellationToken(true)),
+            "pass" => Task.CompletedTask,
+            _ => Task.FromException(new IOException("Simulated IMAPI write failure (test only)."))
+        };
+    }
+    public static Task Verify(PreparedDvd dvd, DvdDrive drive, IProgress<StageProgress> progress, CancellationToken token)
+    {
+        Verifications++;
+        return VerifyBehavior == "crc"
+            ? Task.FromException(new IOException("Simulated read-back CRC failure (test only)."))
+            : Task.CompletedTask;
+    }
+    public static bool Confirm(PreparedDvd dvd, DvdDrive drive) => true;
 }
 '@
 $app = [Compressr.App.App]::new()
@@ -124,9 +155,18 @@ function Luminance([string]$hex) {
 }
 try {
     if ($ScreenshotDirectory) { [IO.Directory]::CreateDirectory($ScreenshotDirectory) | Out-Null }
+    $invalidSettingsState = Join-Path $testState 'invalid-settings'
+    [IO.Directory]::CreateDirectory($invalidSettingsState) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $invalidSettingsState 'dvd-destinations.json'),
+        '{"Iso":"relative.iso","Folder":"relative-folder"}')
+    $invalidSettingsWindow = $constructor.Invoke([object[]]@([string]$invalidSettingsState, $titleLookup,
+        [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
+    try {
+        Check ($invalidSettingsWindow.FindName('Status').Text.Contains('Could not read saved DVD destinations')) 'Invalid persisted destinations are reported without preventing app startup'
+    } finally { $invalidSettingsWindow.Close() }
     foreach ($name in @('Source', 'Inputs', 'Estimate', 'Preview', 'RotationLabel', 'Standard', 'Capacity',
         'Output', 'Drives', 'Options', 'BurnOptions', 'StartButton', 'CancelButton', 'Stage', 'Progress', 'Status',
-        'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
+        'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'SaveLabel', 'DestinationHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
         'BurnSelectedButton', 'RemovePreparedButton', 'CapacityMeter', 'CapacitySummary', 'RetryTitleButton', 'OrientationOptions')) {
         Check ($null -ne $window.FindName($name)) "Retained $name"
         $ui[$name] = $window.FindName($name)
@@ -162,7 +202,8 @@ try {
     Check ($ui.Output.SelectedItem -eq 'Save DVD folder') 'Folder output remains selectable'
     Check ($ui.SavePath.Text.Contains('Compressr-DVD-')) 'Folder destination visible before preparation'
     $ui.Output.SelectedIndex = 2
-    Check ($ui.SaveOptions.Visibility -eq 'Collapsed' -and $ui.StartButton.Content -eq '_Make DVD') 'Direct burn uses unified Make DVD action'
+    Check ($ui.SaveOptions.Visibility -eq 'Visible' -and $ui.StartButton.Content -eq '_Make DVD' -and
+        $ui.SaveLabel.Text.Contains('retryable') -and $ui.DestinationHint.Text.Contains('added to Burn prepared DVDs')) 'Direct burn exposes its retained retryable ISO destination'
     $ui.Output.SelectedIndex = 0
     Check ($ui.SaveOptions.Visibility -eq 'Visible' -and $ui.SavePath.Text.EndsWith('.iso')) 'ISO destination visible before preparation'
     $chosenPath = $ui.SavePath.Text
@@ -431,7 +472,7 @@ try {
         Check ($ui.CapacitySummary.Text.StartsWith('About ') -and $ui.CapacityMeter.Value -gt 0) 'Local generated clips populate live capacity meter without a manual check or video conversion'
         while ($ui.Inputs.Items.Count -gt 0) { Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new()) }
         $destination = Join-Path $testState 'source-job.iso'
-        $window.GetType().GetField('isoDestination', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, [string]$destination)
+        Invoke-Handler 'SetIsoDestination' @([string]$destination)
         $ui.Output.SelectedIndex = 0
         Invoke-Handler 'UpdateOutput' @()
         foreach ($video in $SourceVideoPaths) { Invoke-Handler 'AddVideo' @([string]$video) }
@@ -448,16 +489,17 @@ try {
             $restoredJobs = $restored.FindName('PreparedJobs')
             Check ($restoredJobs.Items.Count -eq $ui.PreparedJobs.Items.Count) 'Prepared list reloads across app windows'
             Check (@($restoredJobs.Items | Where-Object Path -EQ $destination).Count -eq 1) 'Self-contained saved image identity restored'
-        } finally { $restored.Close() }
-        $ui.WorkspaceTabs.SelectedIndex = 0
-        $ui.Output.SelectedIndex = 1
-        $folder = Join-Path $testState 'dvd-folder'
-        $window.GetType().GetField('folderDestination', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, [string]$folder)
-        Invoke-Handler 'UpdateOutput' @()
+            Check ($restored.FindName('SavePath').Text -eq $destination) 'Custom ISO destination persists across app windows'
+            } finally { $restored.Close() }
+            $ui.WorkspaceTabs.SelectedIndex = 0
+            $ui.Output.SelectedIndex = 1
+            $folder = Join-Path $testState 'dvd-folder'
+            Invoke-Handler 'SetFolderDestination' @([string]$folder)
         Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
         Await-Idle
         Check ((Test-Path (Join-Path $folder 'VIDEO_TS\VIDEO_TS.IFO')) -and $ui.Stage.Text -eq 'Done') 'Source-to-DVD-folder workflow retained'
         $ui.Output.SelectedIndex = 2
+        Invoke-Handler 'SetIsoDestination' @([string](Join-Path $testState 'no-writer.iso'))
         Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
         Await-Idle
         Check ($ui.Stage.Text -eq 'Could not complete DVD' -and $ui.Status.Text.Contains('No DVD writer selected')) 'Direct burn without a writer fails explicitly before preparation'
@@ -475,6 +517,99 @@ try {
         Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
         Await-Idle
         Check ($ui.Stage.Text -eq 'Could not complete DVD' -and $ui.Status.Text.Contains('Nothing was started')) 'Failed fresh automatic detection never silently becomes a file-writing action'
+
+        [DiscMonitorFixture]::Failure = $null
+        $retryDestination = Join-Path $testState 'recovery\retryable.iso'
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $retryDestination)) | Out-Null
+        $ui.Output.SelectedIndex = 2
+        [DiscMonitorFixture]::Drives = @($fixtureDrive)
+        [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new($blank, $true, 'fake:retry')
+        Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+        Await-Estimate
+        Invoke-Handler 'SetIsoDestination' @([string]$retryDestination)
+        Check ($ui.SavePath.Text -eq $retryDestination -and
+            (Get-Content (Join-Path $testState 'dvd-destinations.json') -Raw | ConvertFrom-Json).Iso -eq $retryDestination) 'Direct-burn retry destination is visible and durably persisted'
+        $ui.Stage.Text = 'Ready'
+        $ui.Status.Text = 'The verified DVD-ready ISO will be kept at this location before any disc is written.'
+        Layout 1008 921
+        Screenshot 'retryable-iso-destination.png'
+
+        [DiscMonitorFixture]::StateDirectory = $testState
+        [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new($blank, $true, 'fake:retry')
+        [DiscMonitorFixture]::Drives = @($fixtureDrive)
+        [DiscMonitorFixture]::WriteBehavior = 'fail'
+        [DiscMonitorFixture]::VerifyBehavior = 'pass'
+        $writeType = [Func[Compressr.Core.PreparedDvd, Compressr.App.DvdDrive, IProgress[Compressr.Core.StageProgress], Threading.CancellationToken, Threading.Tasks.Task]]
+        $verifyType = $writeType
+        $confirmType = [Func[Compressr.Core.PreparedDvd, Compressr.App.DvdDrive, bool]]
+        $writeDelegate = [Delegate]::CreateDelegate($writeType, [DiscMonitorFixture].GetMethod('Write'))
+        $verifyDelegate = [Delegate]::CreateDelegate($verifyType, [DiscMonitorFixture].GetMethod('Verify'))
+        $confirmDelegate = [Delegate]::CreateDelegate($confirmType, [DiscMonitorFixture].GetMethod('Confirm'))
+        $injectedTypes = [Type[]]@([string], $titleLookup.GetType(), [DiscMonitorFixture]::Enumerate.GetType(),
+            [DiscMonitorFixture]::Inspect.GetType(), $writeType, $verifyType, $confirmType)
+        $injectedCtor = [Compressr.App.MainWindow].GetConstructor(
+            [Reflection.BindingFlags]'Instance,NonPublic', $null, $injectedTypes, $null)
+        $retryWindow = $injectedCtor.Invoke([object[]]@([string]$testState, $titleLookup,
+            [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect, $writeDelegate, $verifyDelegate, $confirmDelegate))
+        $previousWindow = $window
+        $previousUi = $ui
+        try {
+            $window = $retryWindow
+            $ui = @{
+                Output = $retryWindow.FindName('Output')
+                Stage = $retryWindow.FindName('Stage')
+                Status = $retryWindow.FindName('Status')
+                SavePath = $retryWindow.FindName('SavePath')
+            }
+            $retryOutput = $retryWindow.FindName('Output')
+            $retryStateField = [Compressr.App.MainWindow].GetField('isoDestination', [Reflection.BindingFlags]'Instance,NonPublic')
+            Check ($retryStateField.GetValue($retryWindow) -eq $retryDestination) 'New session restores selected direct-burn ISO destination'
+            foreach ($video in $SourceVideoPaths) { $retryWindow.GetType().GetMethod('AddVideo', [Reflection.BindingFlags]'Instance,NonPublic').Invoke($retryWindow, [object[]]@([string]$video)) }
+            $retryWindow.GetType().GetMethod('SetIsoDestination', [Reflection.BindingFlags]'Instance,NonPublic').Invoke($retryWindow, [object[]]@([string]$retryDestination))
+            $retryOutput.SelectedIndex = 2
+            [DiscMonitorFixture]::Writes = 0
+            Invoke-Handler 'Start' @($null, [Windows.RoutedEventArgs]::new())
+            Await-Idle
+            Write-Host "Retry fixture after direct-burn preparation: stage=$($ui.Stage.Text); writes=$([DiscMonitorFixture]::Writes); registered=$([DiscMonitorFixture]::RegisteredBeforeWrite); status=$($ui.Status.Text)"
+            Check ([DiscMonitorFixture]::Writes -eq 1 -and [DiscMonitorFixture]::RegisteredBeforeWrite) 'Complete ISO and retry-list entry are durable before injected burn begins'
+            Check ((Test-Path -LiteralPath $retryDestination) -and $ui.Output.SelectedIndex -eq 2) 'Simulated write failure keeps the prepared ISO and explicit burn choice'
+            Check ($ui.Stage.Text -eq 'Disc not verified' -and $ui.Status.Text.Contains('Select it there to retry')) 'Failed direct burn gives exact retry path without rerunning conversion'
+            Check ((Get-Content (Join-Path $testState 'prepared-jobs.json') -Raw | ConvertFrom-Json) -contains $retryDestination) 'Failed direct burn job is persisted across restart'
+            Layout 1008 921
+            Screenshot 'retryable-iso-after-failed-burn.png'
+
+            $previousTools = $env:COMPRESSR_TOOLS
+            $env:COMPRESSR_TOOLS = Join-Path $testState 'intentionally-missing-tools'
+            $reopened = $injectedCtor.Invoke([object[]]@([string]$testState, $titleLookup,
+                [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect, $writeDelegate, $verifyDelegate, $confirmDelegate))
+            $priorWindow = $window
+            $priorUi = $ui
+            try {
+                $window = $reopened
+                $ui = @{
+                    Output = $reopened.FindName('Output')
+                    Stage = $reopened.FindName('Stage')
+                    Status = $reopened.FindName('Status')
+                }
+                $reopenedJobs = $reopened.FindName('PreparedJobs')
+                $reopenedInputs = $reopened.FindName('Inputs')
+                $reopenedTabs = $reopened.FindName('WorkspaceTabs')
+                $reopenedJobs.SelectedItem = @($reopenedJobs.Items | Where-Object Path -EQ $retryDestination)[0]
+                Check ($reopenedJobs.Items.Count -ge 1 -and $reopenedInputs.Items.Count -eq 0) 'Restart restores prepared image without original source list'
+                $reopenedTabs.SelectedIndex = 1
+                [DiscMonitorFixture]::WriteBehavior = 'cancel'
+                [DiscMonitorFixture]::VerifyBehavior = 'pass'
+                Invoke-Handler 'BurnPrepared' @($null, [Windows.RoutedEventArgs]::new())
+                Await-Idle
+                Check ($window.FindName('Stage').Text -eq 'Cancelled' -and (Test-Path -LiteralPath $retryDestination)) 'Simulated burn cancellation preserves reusable prepared ISO'
+                [DiscMonitorFixture]::WriteBehavior = 'pass'
+                [DiscMonitorFixture]::VerifyBehavior = 'crc'
+                Invoke-Handler 'BurnPrepared' @($null, [Windows.RoutedEventArgs]::new())
+                Await-Idle
+                Check ($window.FindName('Stage').Text -eq 'Disc not verified' -and $window.FindName('Status').Text.Contains('Simulated read-back CRC') -and
+                    (Test-Path -LiteralPath $retryDestination)) 'Simulated read-back failure preserves ISO and reports it unverified'
+            } finally { $window = $priorWindow; $ui = $priorUi; $reopened.Close(); $env:COMPRESSR_TOOLS = $previousTools }
+        } finally { $window = $previousWindow; $ui = $previousUi; $retryWindow.Close() }
         [DiscMonitorFixture]::Drives = @()
         [DiscMonitorFixture]::Failure = $null
     }
