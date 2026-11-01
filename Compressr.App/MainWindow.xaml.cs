@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -17,13 +18,21 @@ public partial class MainWindow : Window
     private bool burning;
     private bool initialized;
     private int rotation;
-    private string? cachedSource;
-    private string? cachedInput;
+    private sealed class InputVideo(string input)
+    {
+        public string Input { get; } = input;
+        public int Rotation { get; set; }
+        public string? CachedSource { get; set; }
+        public string Label => File.Exists(Input) ? Path.GetFileName(Input) : Input;
+        public override string ToString() => Label;
+    }
+    private readonly ObservableCollection<InputVideo> videos = [];
     private readonly List<string> previewFiles = [];
 
     public MainWindow()
     {
         InitializeComponent();
+        Inputs.ItemsSource = videos;
         Standard.ItemsSource = Enum.GetValues<TelevisionSystem>();
         Capacity.ItemsSource = Enum.GetValues<DiscSize>();
         Output.ItemsSource = new[] { "Burn to DVD", "Save ISO", "Save DVD folder" };
@@ -66,6 +75,7 @@ public partial class MainWindow : Window
         try { File.WriteAllText(Path.Combine(stateDirectory, "settings.json"), JsonSerializer.Serialize((TelevisionSystem)Standard.SelectedItem)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { Status.Text = $"Could not save TV standard: {ex.Message}"; }
         Preview.Source = null;
+        Estimate.Text = "TV standard changed. Check fit to refresh estimates.";
     }
     private void OutputChanged(object sender, SelectionChangedEventArgs e)
     { if (Drives != null) Drives.IsEnabled = Output.SelectedIndex == 0; }
@@ -82,8 +92,9 @@ public partial class MainWindow : Window
     }
     private void Browse(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = "Video files|*.mp4;*.mkv;*.mov;*.avi;*.wmv;*.webm;*.mpeg;*.mpg;*.m4v;*.mts;*.m2ts|All files|*.*" };
-        if (dialog.ShowDialog(this) == true) Source.Text = dialog.FileName;
+        var dialog = new OpenFileDialog { Multiselect = true, Filter = "Video files|*.mp4;*.mkv;*.mov;*.avi;*.wmv;*.webm;*.mpeg;*.mpg;*.m4v;*.mts;*.m2ts|All files|*.*" };
+        if (dialog.ShowDialog(this) == true)
+            foreach (string file in dialog.FileNames) AddVideo(file);
     }
     private void SaveScreenshot(object sender, RoutedEventArgs e)
     {
@@ -102,26 +113,94 @@ public partial class MainWindow : Window
         { Status.Text = $"Could not save screenshot: {ex.Message}"; }
     }
     private void SourceChanged(object sender, TextChangedEventArgs e)
-    { rotation = 0; cachedSource = cachedInput = null; if (Preview != null) Preview.Source = null; if (RotationLabel != null) RotationLabel.Text = "Extra rotation: 0°"; }
+    { if (initialized && Source.Text.Length > 0) Estimate.Text = "Input changed. Add it, then Check fit for the combined duration."; }
+    private void AddVideo(string input)
+    {
+        videos.Add(new(input));
+        Inputs.SelectedIndex = videos.Count - 1;
+        Estimate.Text = "List changed. Check fit before making the DVD.";
+    }
+    private bool AddPending()
+    {
+        string input = Source.Text.Trim();
+        if (input.Length > 0)
+        {
+            try { if (!File.Exists(input)) MediaTools.ValidateYouTube(input); }
+            catch (ArgumentException ex) { Status.Text = ex.Message; return false; }
+            AddVideo(input); Source.Clear();
+        }
+        if (videos.Count > 0) return true;
+        Status.Text = "Add at least one local video or YouTube link."; return false;
+    }
+    private void AddInput(object sender, RoutedEventArgs e) => AddPending();
+    private void InputSelected(object sender, SelectionChangedEventArgs e)
+    {
+        rotation = (Inputs.SelectedItem as InputVideo)?.Rotation ?? 0;
+        if (Preview != null) Preview.Source = null;
+        if (RotationLabel != null) RotationLabel.Text = $"Extra rotation: {rotation}°";
+    }
+    private void MoveUp(object sender, RoutedEventArgs e) => MoveInput(-1);
+    private void MoveDown(object sender, RoutedEventArgs e) => MoveInput(1);
+    private void MoveInput(int delta)
+    {
+        int index = Inputs.SelectedIndex;
+        if (index < 0 || index + delta < 0 || index + delta >= videos.Count) return;
+        videos.Move(index, index + delta); Inputs.SelectedIndex = index + delta;
+    }
+    private void RemoveInput(object sender, RoutedEventArgs e)
+    {
+        int index = Inputs.SelectedIndex;
+        if (index < 0) return;
+        videos.RemoveAt(index); Inputs.SelectedIndex = Math.Min(index, videos.Count - 1);
+        Estimate.Text = "List changed. Check fit for the updated duration.";
+    }
     private void OnDragOver(object sender, DragEventArgs e)
     { e.Effects = cancellation == null && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; }
     private void OnDrop(object sender, DragEventArgs e)
     {
         if (cancellation != null) return;
-        if (e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length == 1) Source.Text = files[0];
-        else Status.Text = "Drop exactly one local video file.";
+        if (e.Data.GetData(DataFormats.FileDrop) is string[] files)
+            foreach (var file in files) AddVideo(file);
     }
     private IProgress<StageProgress> Reporter() => new Progress<StageProgress>(p =>
     { Stage.Text = p.Stage; Status.Text = p.Detail; Progress.IsIndeterminate = p.Fraction == null; Progress.Value = (p.Fraction ?? 0) * 100; });
-    private async Task<string> ResolveAsync(MediaTools tools, IProgress<StageProgress> progress, CancellationToken token)
+    private async Task<string> ResolveAsync(InputVideo item, MediaTools tools, IProgress<StageProgress> progress, CancellationToken token)
     {
-        string input = Source.Text.Trim();
-        if (cachedInput == input && cachedSource != null && File.Exists(cachedSource)) return cachedSource;
+        string input = item.Input;
+        if (item.CachedSource != null && File.Exists(item.CachedSource)) return item.CachedSource;
         if (File.Exists(input)) return input;
         MediaTools.ValidateYouTube(input);
-        cachedSource = await tools.DownloadAsync(input, Path.Combine(stateDirectory, "downloads", Guid.NewGuid().ToString("N")), progress, token);
-        cachedInput = input;
-        return cachedSource;
+        item.CachedSource = await tools.DownloadAsync(input, Path.Combine(stateDirectory, "downloads", Guid.NewGuid().ToString("N")), progress, token);
+        return item.CachedSource;
+    }
+    private async Task<VideoInfo> EstimateAsync(MediaTools tools, CancellationToken token)
+    {
+        var clips = new List<VideoClip>();
+        foreach (var item in videos)
+        {
+            Stage.Text = "Inspect"; Status.Text = $"Checking {item.Label} (no YouTube download)…";
+            VideoInfo info;
+            string source = item.CachedSource != null && File.Exists(item.CachedSource) ? item.CachedSource : item.Input;
+            if (File.Exists(source)) info = await tools.ProbeAsync(source, token);
+            else
+            {
+                var metadata = await tools.YouTubeMetadataAsync(item.Input, token);
+                info = new(metadata.Duration, 1920, 1080, 1, 0, true);
+            }
+            clips.Add(new(item.Input, info, item.Rotation));
+        }
+        var combined = VideoPlaylist.Combined(clips);
+        Estimate.Text = VideoPlaylist.FitEstimate(combined, (TelevisionSystem)Standard.SelectedItem);
+        return combined;
+    }
+    private async void CheckFit(object sender, RoutedEventArgs e)
+    {
+        if (cancellation != null || !AddPending()) return;
+        cancellation = new(); Busy(true);
+        try { await EstimateAsync(Tools(), cancellation.Token); Stage.Text = "Fit checked"; Status.Text = Estimate.Text; }
+        catch (OperationCanceledException) { Stage.Text = "Cancelled"; }
+        catch (Exception ex) { Stage.Text = "Fit check failed"; Estimate.Text = "Fit is unknown."; Status.Text = ex.Message; }
+        finally { cancellation.Dispose(); cancellation = null; Busy(false); }
     }
     private void Busy(bool value)
     {
@@ -129,19 +208,25 @@ public partial class MainWindow : Window
     }
     private async void ShowPreview(object sender, RoutedEventArgs e) => await PreviewAsync();
     private async void Rotate(object sender, RoutedEventArgs e)
-    { rotation = (rotation + 90) % 360; RotationLabel.Text = $"Extra rotation: {rotation}°"; await PreviewAsync(); }
+    {
+        if (!AddPending()) return;
+        rotation = (rotation + 90) % 360;
+        ((InputVideo)Inputs.SelectedItem).Rotation = rotation;
+        RotationLabel.Text = $"Extra rotation: {rotation}°"; await PreviewAsync();
+    }
     private async Task PreviewAsync()
     {
-        if (cancellation != null) return;
+        if (cancellation != null || !AddPending()) return;
         cancellation = new(); Busy(true);
         try
         {
             var tools = Tools(); var reporter = Reporter();
-            string source = await ResolveAsync(tools, reporter, cancellation.Token);
+            var selected = (InputVideo)Inputs.SelectedItem;
+            string source = await ResolveAsync(selected, tools, reporter, cancellation.Token);
             var info = await tools.ProbeAsync(source, cancellation.Token);
             // Preview remains available even when the selected disc cannot fit the source.
             var plan = new DvdPlan((TelevisionSystem)Standard.SelectedItem, 0, 0,
-                info.DisplayAspect(rotation) >= 1.55, 720, Standard.SelectedItem.Equals(TelevisionSystem.PAL) ? 576 : 480);
+                videos.Count > 1 || info.DisplayAspect(rotation) >= 1.55, 720, Standard.SelectedItem.Equals(TelevisionSystem.PAL) ? 576 : 480);
             string frame = Path.Combine(stateDirectory, $"preview-{Guid.NewGuid():N}.png");
             previewFiles.Add(frame);
             await tools.RunAsync(tools.Ffmpeg, ["-y", "-nostdin", "-ss", Math.Min(3, info.Duration / 2).ToString(System.Globalization.CultureInfo.InvariantCulture),
@@ -157,7 +242,7 @@ public partial class MainWindow : Window
     }
     private async void Start(object sender, RoutedEventArgs e)
     {
-        if (cancellation != null) return;
+        if (cancellation != null || !AddPending()) return;
         string destination;
         if (Output.SelectedIndex == 2)
         {
@@ -183,12 +268,20 @@ public partial class MainWindow : Window
         try
         {
             var token = cancellation.Token; var reporter = Reporter(); var tools = Tools();
-            var source = await ResolveAsync(tools, reporter, token);
+            var estimate = await EstimateAsync(tools, token);
+            _ = DvdPlan.Create(estimate, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
+            var clips = new List<VideoClip>();
+            foreach (var item in videos)
+            {
+                var source = await ResolveAsync(item, tools, reporter, token);
+                clips.Add(new(source, await tools.ProbeAsync(source, token), item.Rotation));
+            }
             Stage.Text = "Inspect"; Status.Text = "Checking duration, orientation and disc fit…";
-            var info = await tools.ProbeAsync(source, token);
-            var plan = DvdPlan.Create(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, rotation);
+            var info = VideoPlaylist.Combined(clips);
+            Estimate.Text = VideoPlaylist.FitEstimate(info, (TelevisionSystem)Standard.SelectedItem);
+            var plan = DvdPlan.Create(info, (TelevisionSystem)Standard.SelectedItem, (DiscSize)Capacity.SelectedItem, 0);
             if (output == 0) DiscWriter.CheckBlank(drive!, plan.Capacity * 95 / 100);
-            var dvd = await new DvdPipeline(tools).AuthorAsync(source, info, plan, rotation, work, reporter, token);
+            var dvd = await new DvdPipeline(tools).AuthorPlaylistAsync(clips, plan, work, reporter, token);
             if (output == 2)
             {
                 token.ThrowIfCancellationRequested();

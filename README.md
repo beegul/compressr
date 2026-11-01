@@ -1,7 +1,7 @@
 # Compressr
 
-**Video in. DVD out.** A personal Windows desktop app for turning one local video
-or a permitted YouTube video into an autoplay DVD-Video, without a separate
+**Video in. DVD out.** A personal Windows desktop app for turning local videos
+and permitted YouTube videos into one continuous autoplay DVD-Video, without a separate
 HandBrake step or codec settings. This is source for personal use, not a packaged
 or signed public release.
 
@@ -9,8 +9,9 @@ or signed public release.
 
 The desktop app builds with **zero warnings/errors**. Generated-media checks
 cover landscape, silent rotated portrait, PAL/NTSC, manual rotation and overlong
-input and half-D1 encoding; five authored ISOs have been mounted and their
-VIDEO_TS hashes matched. The final focused/integration run passed 57 assertions.
+input and half-D1 encoding, plus ordered stitching with mixed formats and audio.
+Eight authored ISOs have been mounted and their VIDEO_TS hashes matched.
+The focused/integration run passed 91 assertions.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. Physical burning has **not** been performed.
 
@@ -50,19 +51,33 @@ authoring executables without their DLLs. Update the downloader when YouTube cha
 
 ## Use
 
-1. Drop one video, browse, or paste an HTTPS YouTube link. Only download/copy
+1. Drop one or more files, browse (multi-select supported), or paste an HTTPS
+   YouTube link and click **Add**. Files and links can be mixed. A single
+   pending file/link is also added automatically on Preview, Check fit or Make DVD,
+   preserving the quick single-video workflow. Only download/copy
    content you own or have permission to use; no DRM or login bypass is provided.
-2. Use **Preview / refresh** and **Rotate right** if needed. The preview uses the
+2. Use **Move up**, **Move down** and **Remove** to arrange parts. They play
+   in the displayed order, joined into one title with no menu or transition.
+   Select a part, then use **Preview / refresh** and **Rotate right** if needed.
+   Each part keeps its own manual rotation. The preview uses the
    same padding/rotation geometry as the encode. Metadata rotation is automatic;
    the manual override adds quarter turns. YouTube preview downloads the source
    once and reuses it for that input.
-3. Choose PAL (default, remembered) or NTSC, single-layer or dual-layer capacity,
+3. Use **Check fit** for combined duration and single-/dual-layer bitrate estimates.
+   For YouTube it requests public metadata only, without downloading the videos.
+   A metadata failure makes fit unknown rather than assuming a duration.
+   Make DVD checks fit again before downloads, then reprobes the downloaded
+   originals before any conversion. Overlong parts are never silently dropped.
+4. Choose PAL (default, remembered) or NTSC, single-layer or dual-layer capacity,
    and ISO, DVD folder, or a detected writer. **Make DVD** runs the pipeline.
    Burning requires a blank writable DVD and an explicit confirmation. Compressr
    never erases media. ISO is the safe default for trying it without a writer.
 
 YouTube downloads are capped at 1080p where that rendition exists: ample source
 resolution for a DVD without an unnecessary 4K download.
+YouTube `t=`, `start=` or `#t=` playback timestamps are incidental: **the whole
+video is used**, not just the portion after that timestamp. There is no trimming
+feature. Every listed source is included in full.
 The stages report download, two-pass conversion with percentage, authoring,
 image creation, burn/finalisation and file read-back verification. Download,
 authoring, imaging and burning currently show indeterminate progress rather
@@ -75,8 +90,14 @@ burning; writing/finalising and read-back must finish before the app closes.
   192 kbps / 48 kHz; silence is supplied for sources without audio.
 - Source sample aspect and rotation metadata are honoured. Display aspect is
   preserved using black letterbox/pillarbox bars, never intentional cropping or
-  stretching. 4:3 or 16:9 DVD flags are selected automatically.
-- Two-pass bitrate budgeting uses source duration, 4.7 GB / 8.55 GB capacity,
+  stretching. A single source keeps automatic 4:3/16:9 selection; multi-video
+  titles use a common 16:9 canvas with bars for narrower parts.
+- Before joining, each source is normalized to common DVD geometry, pixel
+  aspect, PAL/NTSC frame rate, zero-based timestamps and 48 kHz stereo audio.
+  Silent parts get silence, short audio is padded, and mixed sample rates or
+  channel layouts are handled. Concatenation happens inside the two-pass
+  encoder; no giant intermediate uncompressed file or lossy pre-compression is needed.
+- Two-pass bitrate budgeting uses **combined** source duration, 4.7 GB / 8.55 GB capacity,
   a 5% safety reserve, authoring reserve and mux overhead, capped at 8 Mbps video.
   Below 3 Mbps it uses half-D1 (352 pixels wide). Below 2 Mbps the operation
   stops **before encoding**, suggesting dual-layer or splitting. This is a
@@ -93,7 +114,7 @@ burning; writing/finalising and read-back must finish before the app closes.
   mounted disc. It is file-level read-back, not an exhaustive sector scan or
   proof of playback on a particular set-top player. Verification failure is
   shown explicitly even after a burn has completed.
-- One title only; no chapter/menu editor, subtitles, DRM, batch input, source
+- One continuous title only; no chapter/menu editor, subtitles, DRM, source
   splitting, or advanced quality controls. HDR/10-bit tone mapping and damaged
   or unusual streams are not specifically supported. FFmpeg/yt-dlp failures
   display tool diagnostics.
@@ -113,11 +134,16 @@ dotnet build .\Compressr.App\Compressr.App.csproj -c Release
 
 The dependency-free console test harness checks exact fit boundaries for both
 capacities, invalid inputs, bitrate/mux budget, sample aspect, metadata/manual
-rotation, padding, half-D1 and URL validation. Integration generates landscape
+rotation, padding, half-D1, ordered/combined fit and URL validation. Integration generates landscape
 with audio, a silent phone-style file with rotation metadata, PAL and NTSC
 outputs, a manual rotation case and half-D1 encoding. It authors DVD folders and ISOs, probes
 decoded VOB codecs/geometry/DAR/frame rate/audio, checks actual decoded portrait side bars,
 and rejects a compact genuine five-hour clip before conversion.
+Additional stitched PAL, NTSC and reversed-order tests use distinct red/blue/green
+clips with different lengths, 24/30/60 fps, non-square pixels, phone rotation,
+44.1/32 kHz mono audio and a silent middle part. They check decoded clip order,
+full combined duration, normalized output, portrait bars and silent audio after
+real conversion and authoring.
 The PowerShell harness mounts each generated ISO and checks navigation files and
 all VIDEO_TS hashes against the authored tree. It never writes or erases a
 physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
@@ -127,3 +153,24 @@ physical DVD. Results and ffprobe JSON are kept in ignored `artifacts`.
 
 Physical DVD writing, finalised disc read-back, older player compatibility,
 and dual-layer layer-break behaviour require real hardware and remain untested.
+
+## Four-part concert fit example
+
+Public YouTube metadata checked on 1 November 2026 (no concert video downloaded):
+
+| Part | YouTube ID | Reported duration |
+|------|------------|-------------------|
+| 1 | Ph7SZcdIK0E | 37:11 |
+| 2 | 7OU91NR559A | 41:57 |
+| 3 | f-NGGoCCQBA | 57:16 |
+| 4 | LjAJzcHZSq0 | 38:08 |
+
+The titles identify Bruce Springsteen / *Land of Hope and Dreams American Tour*
+(Philadelphia Freedom Cut parts 2–4; part 1's published title is truncated).
+Total: **2:54:32** (10,472 seconds), including all of part 4 despite its `t=1082s` link.
+With the current overhead reserves and 192 kbps audio, it fits single-layer at
+**3.063 Mbps** video, or dual-layer at **5.748 Mbps**, both full-D1.
+Dual-layer provides appreciably more quality headroom for concert motion/detail.
+These are metadata-based fit estimates, not an assessment of this concert's
+visual quality or proof of a burned disc. Availability/metadata may change.
+Only generated clips and permitted media are used for the actual pipeline tests.

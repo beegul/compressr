@@ -48,6 +48,29 @@ Throws<ArgumentException>(() => MediaTools.ValidateYouTube("http://youtube.com/w
 Throws<ArgumentException>(() => MediaTools.ValidateYouTube("file:///C:/private"), "non-YouTube URL");
 Console.WriteLine($"PASS: {assertions} unit assertions");
 
+var listInfo = VideoPlaylist.Combined([new("one", landscape), new("two", phone, 90)]);
+Check(listInfo.Duration == 7200 && listInfo.DisplayAspect(0) > 1.7, "combined duration and common wide canvas");
+Check(VideoPlaylist.Combined([new("one", phone)]).DisplayAspect(0) < 1.55, "single portrait preserves existing 4:3 canvas choice");
+Throws<ArgumentException>(() => VideoPlaylist.Combined([]), "empty playlist");
+Throws<ArgumentException>(() => VideoPlaylist.Combined([new("bad", phone with { Duration = double.NaN })]), "invalid clip duration");
+foreach (DiscSize size in Enum.GetValues<DiscSize>())
+{
+    double limit = (DvdPlan.DiscCapacity(size) * .95 - 32 * 1024 * 1024) * 8 /
+        ((DvdPlan.MinimumBitrate + DvdPlan.AudioBitrate) * 1.04);
+    var fit = VideoPlaylist.Combined([new("one", landscape with { Duration = limit / 2 - .1 }),
+        new("two", phone with { Duration = limit / 2 })]);
+    Check(DvdPlan.Create(fit, TelevisionSystem.PAL, size, 0).VideoBitrate >= DvdPlan.MinimumBitrate, "playlist just fits " + size);
+    Throws<InvalidOperationException>(() => DvdPlan.Create(fit with { Duration = limit + .1 }, TelevisionSystem.PAL, size, 0), "playlist exceeds boundary " + size);
+}
+var concat = VideoPlaylist.ConcatFilter([new("one", landscape), new("two", phone, 90)], pal, true);
+Check(concat.Contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1"), "explicit clip ordering");
+Check(concat.Contains("anullsrc=r=48000:cl=stereo") && concat.Contains("aresample=48000"), "normalizes mixed audio and silence");
+Check(MediaTools.ValidateYouTube("https://www.youtube.com/watch?v=LjAJzcHZSq0&t=1082s").Fragment == "", "timestamp URL accepted without trimming");
+var concert = landscape with { Duration = 10472 };
+Check(DvdPlan.Create(concert, TelevisionSystem.PAL, DiscSize.SingleLayer, 0).VideoBitrate == 3_063_000, "concert metadata total single-layer estimate");
+Check(DvdPlan.Create(concert, TelevisionSystem.PAL, DiscSize.DualLayer, 0).VideoBitrate == 5_748_000, "concert metadata total dual-layer estimate");
+Console.WriteLine($"PASS: {assertions} unit/playlist assertions");
+
 if (!args.Contains("--integration")) return;
 string root = Path.GetFullPath(args.SkipWhile(a => a != "--output").Skip(1).FirstOrDefault() ?? "artifacts");
 Directory.CreateDirectory(root);
@@ -116,5 +139,61 @@ if (args.Contains("--youtube"))
     string url = args.SkipWhile(a => a != "--youtube").Skip(1).First();
     string downloaded = await tools.DownloadAsync(url, Path.Combine(root, "youtube-" + Guid.NewGuid().ToString("N")), progress, token);
     Check((await tools.ProbeAsync(downloaded, token)).Duration > 0, "YouTube download probes");
+}
+// Distinct colors and durations prove clip order and completeness after real DVD authoring.
+string red = Path.Combine(root, "red.mp4"), blue = Path.Combine(root, "blue-rotated.mp4"),
+    blueBase = Path.Combine(root, "blue.mp4"), green = Path.Combine(root, "green.mp4");
+await tools.RunAsync(tools.Ffmpeg, ["-y", "-f", "lavfi", "-i", "color=red:size=320x180:rate=24",
+    "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100", "-t", "1.25", "-c:v", "mpeg4",
+    "-c:a", "aac", "-ac", "1", red], token);
+await tools.RunAsync(tools.Ffmpeg, ["-y", "-f", "lavfi", "-i", "color=blue:size=320x180:rate=30",
+    "-t", "2", "-c:v", "mpeg4", blueBase], token);
+await tools.RunAsync(tools.Ffmpeg, ["-y", "-display_rotation:v:0", "90", "-i", blueBase,
+    "-c", "copy", blue], token);
+await tools.RunAsync(tools.Ffmpeg, ["-y", "-f", "lavfi", "-i", "color=lime:size=320x240:rate=60",
+    "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=32000", "-vf", "setsar=2/1", "-t", "1.75",
+    "-c:v", "mpeg4", "-c:a", "aac", green], token);
+var ordered = new List<VideoClip>();
+foreach (string file in new[] { red, blue, green }) ordered.Add(new(file, await tools.ProbeAsync(file, token)));
+foreach (var test in new[] { (Name: "stitch-pal", System: TelevisionSystem.PAL, Reverse: false),
+    (Name: "stitch-ntsc", System: TelevisionSystem.NTSC, Reverse: false),
+    (Name: "stitch-reverse-pal", System: TelevisionSystem.PAL, Reverse: true) })
+{
+    var clips = test.Reverse ? ordered.AsEnumerable().Reverse().ToArray() : ordered.ToArray();
+    var combined = VideoPlaylist.Combined(clips);
+    var plan = DvdPlan.Create(combined, test.System, DiscSize.SingleLayer, 0);
+    string work = Path.Combine(root, test.Name);
+    string dvd = await new DvdPipeline(tools).AuthorPlaylistAsync(clips, plan, work, progress, token);
+    await tools.CreateIsoAsync(dvd, Path.Combine(root, test.Name + ".iso"), plan, progress, token);
+    string title = Path.Combine(work, "title.mpg");
+    var resultInfo = await tools.ProbeAsync(title, token);
+    Check(Math.Abs(resultInfo.Duration - combined.Duration) < .2, test.Name + " all clip durations retained");
+    Check(resultInfo.Width == 720 && resultInfo.Height == plan.Height && resultInfo.HasAudio, test.Name + " normalized geometry/audio");
+    double offset = 0;
+    foreach (var clip in clips)
+    {
+        double seek = offset + clip.Info.Duration / 2;
+        string frame = Path.Combine(work, $"order-{offset:F2}.rgb");
+        await tools.RunAsync(tools.Ffmpeg, ["-y", "-ss", seek.ToString(CultureInfo.InvariantCulture),
+            "-i", title, "-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", frame], token);
+        byte[] pixels = File.ReadAllBytes(frame);
+        int center = (plan.Height / 2 * plan.Width + plan.Width / 2) * 3;
+        int channel = clip.Source == red ? 0 : clip.Source == green ? 1 : 2;
+        Check(pixels[center + channel] > 180 && Enumerable.Range(0, 3).Where(c => c != channel).All(c => pixels[center + c] < 40),
+            test.Name + " decoded clip order " + Path.GetFileName(clip.Source));
+        if (clip.Source == blue)
+        {
+            int edge = (plan.Height / 2 * plan.Width + 4) * 3;
+            Check(pixels.Skip(edge).Take(3).All(b => b < 20), test.Name + " rotated portrait padding");
+            string audio = Path.Combine(work, "silent.pcm");
+            await tools.RunAsync(tools.Ffmpeg, ["-y", "-ss", seek.ToString(CultureInfo.InvariantCulture),
+                "-i", title, "-t", "0.2", "-vn", "-f", "s16le", "-acodec", "pcm_s16le", audio], token);
+            Check(File.ReadAllBytes(audio).All(b => b == 0), test.Name + " silent middle clip has no neighbouring audio");
+        }
+        offset += clip.Info.Duration;
+    }
+    File.WriteAllText(Path.Combine(work, "ffprobe.json"),
+        await tools.RunAsync(tools.Ffprobe, ["-v", "error", "-show_streams", "-show_format", "-of", "json", title], token));
+    Console.WriteLine($"PASS: {test.Name}: clip order, complete duration, geometry and silence");
 }
 Console.WriteLine($"PASS: {assertions} total assertions; generated ISO/VIDEO_TS results in {root}");

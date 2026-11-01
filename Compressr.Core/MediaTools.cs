@@ -110,6 +110,20 @@ public sealed class MediaTools
         return uri;
     }
 
+    public async Task<YouTubeInfo> YouTubeMetadataAsync(string input, CancellationToken token)
+    {
+        var uri = ValidateYouTube(input);
+        var args = new List<string> { "--no-playlist", "--skip-download", "--dump-json" };
+        string deno = Path.Combine(Path.GetDirectoryName(YtDlp)!, "deno.exe");
+        if (File.Exists(deno)) args.AddRange(["--js-runtimes", "deno:" + deno]);
+        args.AddRange(["--", uri.AbsoluteUri]);
+        using var doc = JsonDocument.Parse(await RunAsync(YtDlp, args, token));
+        double duration = doc.RootElement.GetProperty("duration").GetDouble();
+        if (!double.IsFinite(duration) || duration <= 0)
+            throw new InvalidOperationException("YouTube did not provide a finite duration; live streams are not supported.");
+        return new(doc.RootElement.GetProperty("title").GetString() ?? "YouTube video", duration);
+    }
+
     public async Task<string> DownloadAsync(string url, string directory, IProgress<StageProgress> progress, CancellationToken token)
     {
         var uri = ValidateYouTube(url);

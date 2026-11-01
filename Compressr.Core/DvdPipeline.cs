@@ -7,26 +7,34 @@ public sealed class DvdPipeline(MediaTools tools)
 {
     public async Task<string> AuthorAsync(string source, VideoInfo video, DvdPlan plan, int rotation,
         string work, IProgress<StageProgress> progress, CancellationToken token)
+        => await AuthorPlaylistAsync([new(source, video, rotation)], plan, work, progress, token);
+
+    public async Task<string> AuthorPlaylistAsync(IReadOnlyList<VideoClip> clips, DvdPlan plan,
+        string work, IProgress<StageProgress> progress, CancellationToken token)
     {
+        var video = VideoPlaylist.Combined(clips);
         Directory.CreateDirectory(work);
         string mpg = Path.Combine(work, "title.mpg");
         string passLog = Path.Combine(work, "encode");
-        string duration = video.Duration.ToString("0.######", CultureInfo.InvariantCulture);
-        string[] videoArgs = ["-map", "0:v:0", "-vf", plan.Filter(rotation), "-c:v", "mpeg2video",
+        string[] videoArgs = ["-map", "[video]", "-c:v", "mpeg2video",
             "-pix_fmt", "yuv420p", "-r", plan.FrameRate, "-g", plan.Gop.ToString(CultureInfo.InvariantCulture),
             "-b:v", plan.VideoBitrate.ToString(CultureInfo.InvariantCulture), "-maxrate:v", "8000000",
             "-bufsize:v", "1835008", "-flags", "+cgop", "-sc_threshold", "1000000000",
-            "-aspect", plan.Aspect, "-passlogfile", passLog, "-t", duration];
+            "-aspect", plan.Aspect, "-passlogfile", passLog];
         for (int pass = 1; pass <= 2; pass++)
         {
             int currentPass = pass;
             progress.Report(new("Convert", 0, $"Encoding pass {pass}/2…"));
-            var args = new List<string> { "-y", "-nostdin", "-i", source };
-            if (pass == 2 && !video.HasAudio) args.AddRange(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
+            var args = new List<string> { "-y", "-nostdin" };
+            foreach (var clip in clips) args.AddRange(["-i", clip.Source]);
+            // Keep identical segment timing in both passes, including audio padding.
+            string graph = VideoPlaylist.ConcatFilter(clips, plan, true);
+            if (pass == 1) graph += ";[audio]anullsink";
+            args.AddRange(["-filter_complex", graph]);
             args.AddRange(videoArgs);
             args.AddRange(["-pass", pass.ToString(CultureInfo.InvariantCulture), "-progress", "pipe:1", "-nostats"]);
             if (pass == 1) args.AddRange(["-an", "-f", "null", "NUL"]);
-            else args.AddRange(["-map", video.HasAudio ? "0:a:0" : "1:a:0", "-af", "apad", "-c:a", "ac3",
+            else args.AddRange(["-map", "[audio]", "-c:a", "ac3",
                 "-b:a", "192k", "-ar", "48000", "-ac", "2", "-f", "dvd", "-muxrate", "0", "-packetsize", "2048", mpg]);
             await tools.RunAsync(tools.Ffmpeg, args, token, line =>
             {
