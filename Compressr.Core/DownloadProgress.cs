@@ -41,6 +41,7 @@ public static class DownloadProgress
                 ? remaining.ToString(@"h\:mm\:ss", CultureInfo.InvariantCulture)
                 : remaining.ToString(@"m\:ss", CultureInfo.InvariantCulture));
         }
+        else if (status != "finished") detail += " · ETA unavailable";
         if (status == "finished") detail += " · stream downloaded; next stream or merge may follow";
         return new("Download", fraction, $"{source}\nCurrent stream: {detail}");
     }

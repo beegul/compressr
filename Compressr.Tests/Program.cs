@@ -192,6 +192,8 @@ Throws<ArgumentOutOfRangeException>(() => selection.Choose((OutputKind)99), "inv
 Console.WriteLine($"PASS: {assertions} unit/media/output-selection assertions");
 await DiscPreparationTests.RunAsync(Check);
 PreparedImageDestinationTests.Run(Check);
+await DvdImageNameTests.RunAsync(Check);
+BurnProgressTests.Run(Check);
 Console.WriteLine($"PASS: {assertions} unit/media/output/preparation assertions (fake erasure only)");
 await ReliabilityTests.RunProcessAsync(Check);
 await SourceVideoTests.RunAsync(Check);

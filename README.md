@@ -22,7 +22,12 @@ checked again before confirmation and immediately before writing.
 
 Every burn includes a read-only **Disc preflight**: recorder support, DVD type,
 blankness, blocking status and capacity. A supported blank DVD needs no separate
-Windows formatting. Nonblank write-once DVD-R/+R (including dual-layer) cannot be
+Windows formatting or erasure: physically blank or logically empty rewritable
+discs pass straight through if their current status permits writing, even without
+erase support. A blankness flag alone does not override an unknown, damaged,
+protected, incomplete or erase-required state. IMAPI may initialize/format unused
+media as part of writing; that is distinct from erasing existing contents.
+Nonblank write-once DVD-R/+R (including dual-layer) cannot be
 erased or reused: insert a new blank disc. **Make DVD** (or **Burn selected DVD…**)
 automatically runs the checks and, for supported DVD-RW/+RW, offers preparation
 when needed. It identifies the drive and exact
@@ -64,6 +69,16 @@ insufficient free space stop before disc preparation or conversion; incomplete
 images are never registered as prepared jobs. Cancelling either save dialog keeps
 the previous destination.
 
+New ISO names follow the first video title (YouTube metadata) or local filename,
+for example **Summer holiday.iso**. Multiple clips use **Summer holiday and 2
+more.iso**, following play order without sorting. Windows-invalid/reserved names
+are sanitized and long names shortened. Automatic naming keeps the selected
+folder and updates as titles/order change. A different filename entered in
+**Change…** is treated as custom, saved between runs and left unchanged by source
+changes. Legacy generic **Compressr.iso** destinations adopt automatic naming;
+other legacy names remain custom. Existing files still require native overwrite
+confirmation; naming never deletes or silently replaces a saved image.
+
 Each successful ISO preparation is added to **Prepared DVDs**. Add multiple
 existing ISOs with **Add prepared ISOs…**, then select **one** and burn it to **one**
 blank DVD. Repeat with another file and a new blank disc. The list survives app
@@ -103,6 +118,28 @@ sentence-case labels and keyboard focus indicators, following
 [Windows typography guidance](https://learn.microsoft.com/en-us/windows/apps/design/signature-experiences/typography)
 and [accessible text contrast guidance](https://learn.microsoft.com/en-us/windows/apps/design/accessibility/accessible-text-requirements).
 
+### Downloading, burning and verification progress
+
+Downloads show the current clip, current video/audio stream percentage,
+downloaded/total bytes, speed and yt-dlp ETA when supplied. Unknown totals or ETA
+are identified, not guessed; each stream can start its own percentage and merging
+has no invented percentage. Burning now uses IMAPI's native update events: checking
+media, preparing/initializing, calibrating, writing image data, finalising, then
+strict SHA-256 read-back. The burn bar measures **image sectors written**, not
+elapsed time. The writer's remaining-time estimate may change and excludes app
+read-back; it is unavailable until IMAPI provides a meaningful estimate.
+**Write complete is not disc verified.** Only a matching full read-back reports
+success. Failure keeps the prepared ISO and never erases, retries or switches
+output automatically.
+
+Both Make DVD direct-burn and Burn prepared DVDs validate/reopen a self-contained
+ISO and call the same writer and read-back code. Direct-burn also preflights before
+conversion. Burning a retained ISO avoids conversion time but does not change the
+physical write algorithm or guarantee healthier media. The drive/media's existing
+automatic speed policy is unchanged. IMAPI supports requesting a supported speed
+**before** writing, but a slower speed is not a demonstrated cure for CRC errors;
+Compressr does not attempt mid-burn speed changes or automatic erase/reburn.
+
 ## Current verification status
 
 The desktop app builds with **zero warnings/errors**. Generated-media checks
@@ -118,7 +155,9 @@ tests cover custom paths, free-space and write-access checks, raced overwrites,
 atomic replacement and settings/list persistence. Fake recorder callbacks
 exercise a direct-burn image registered before writing, then simulated write,
 cancellation and read-back failures with the ISO still selectable after restart.
-Destructive
+Naming and burn-progress tests cover safe names, explicit/automatic persistence,
+sector/ETA events, real no-write COM event subscription and the distinction
+between finalisation and verified success. Destructive
 preparation branches are tested with typed fakes, not physical erasures.
 The YouTube path has downloaded and probed Blender's Creative Commons
 *Big Buck Bunny* test video. One user-authorized physical DVD+RW burn on an

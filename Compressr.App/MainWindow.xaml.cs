@@ -36,7 +36,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, (long Length, DateTime Modified, VideoInfo Info)> probeCache = new(StringComparer.OrdinalIgnoreCase);
     private string isoDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Compressr.iso");
     private string folderDestination = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), $"Compressr-DVD-{DateTime.Now:yyyyMMdd-HHmmss}");
-    private sealed record DestinationSettings(string? Iso, string? Folder);
+    private bool automaticIsoName = true;
+    private sealed record DestinationSettings(string? Iso, string? Folder, bool? AutomaticIsoName = null);
     private sealed record PreparedJob(string Path, string Status)
     {
         public string Name => System.IO.Path.GetFileName(Path);
@@ -92,6 +93,7 @@ public partial class MainWindow : Window
                 1 => "1 video · plays in full",
                 _ => $"{videos.Count} videos · play in this order"
             };
+            RefreshIsoName();
             ScheduleEstimate();
         };
         Standard.ItemsSource = Enum.GetValues<TelevisionSystem>();
@@ -331,6 +333,7 @@ public partial class MainWindow : Window
     {
         string iso = isoDestination;
         string folder = folderDestination;
+        bool automatic = automaticIsoName;
         if (outputSelection.Selected == OutputKind.Folder)
         {
             var dialog = new OpenFolderDialog { Title = "Choose a parent folder for a new DVD folder", InitialDirectory = Path.GetDirectoryName(folderDestination) };
@@ -347,10 +350,23 @@ public partial class MainWindow : Window
             };
             if (dialog.ShowDialog(this) != true) return false;
             iso = dialog.FileName;
+            automatic = automaticIsoName && string.Equals(Path.GetFileName(iso), Path.GetFileName(isoDestination), StringComparison.OrdinalIgnoreCase);
         }
-        PersistDestinations(iso, folder);
+        PersistDestinations(iso, folder, automatic);
         UpdateOutput();
         return true;
+    }
+
+    private void RefreshIsoName()
+    {
+        if (!initialized || !automaticIsoName || cancellation != null) return;
+        try
+        {
+            isoDestination = DvdImageName.Suggest(Path.GetDirectoryName(isoDestination)!, videos);
+            UpdateOutput();
+        }
+        catch (Exception ex) when (ex is IOException or ArgumentException)
+        { Stage.Text = "Save location unavailable"; Status.Text = ex.Message; }
     }
 
     private static string NormalizeDestination(string path, string extension)
@@ -382,6 +398,7 @@ public partial class MainWindow : Window
             string folder = NormalizeFolderDestination(saved.Folder ?? "");
             isoDestination = iso;
             folderDestination = folder;
+            automaticIsoName = saved.AutomaticIsoName ?? Path.GetFileName(iso).Equals("Compressr.iso", StringComparison.OrdinalIgnoreCase);
         }
         catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException or ArgumentException or InvalidDataException)
         {
@@ -389,7 +406,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void PersistDestinations(string iso, string folder)
+    private void PersistDestinations(string iso, string folder, bool? automatic = null)
     {
         iso = NormalizeDestination(iso, ".iso");
         folder = NormalizeFolderDestination(folder);
@@ -397,7 +414,7 @@ public partial class MainWindow : Window
         string pending = path + $".{Guid.NewGuid():N}.tmp";
         try
         {
-            File.WriteAllText(pending, JsonSerializer.Serialize(new DestinationSettings(iso, folder)));
+            File.WriteAllText(pending, JsonSerializer.Serialize(new DestinationSettings(iso, folder, automatic ?? automaticIsoName)));
             File.Move(pending, path, true);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
@@ -412,11 +429,12 @@ public partial class MainWindow : Window
         }
         isoDestination = iso;
         folderDestination = folder;
+        automaticIsoName = automatic ?? automaticIsoName;
     }
 
     private void SetIsoDestination(string path)
     {
-        PersistDestinations(path, folderDestination);
+        PersistDestinations(path, folderDestination, false);
         UpdateOutput();
     }
 
@@ -569,7 +587,7 @@ public partial class MainWindow : Window
         try { await pending; }
         catch (OperationCanceledException) { /* The queue row reports cancellation or timeout. */ }
         catch (Exception) { /* The queue row retains the lookup error and original URL. */ }
-        finally { UpdateCancelButton(); if (videos.Contains(item)) ScheduleEstimate(); }
+        finally { UpdateCancelButton(); if (videos.Contains(item)) { RefreshIsoName(); ScheduleEstimate(); } }
     }
     private async void RetryTitle(object sender, RoutedEventArgs e)
     {
@@ -949,11 +967,17 @@ public partial class MainWindow : Window
                 throw new IOException(readiness.Detail + " Nothing was started. Choose file output explicitly to save without a disc.");
             output = outputSelection.Selected;
             DvdDrive? drive = Drives.SelectedItem as DvdDrive;
+            var estimate = await EstimateAsync(tools, videos.ToArray(), token);
+            if (automaticIsoName)
+            {
+                isoDestination = DvdImageName.Suggest(Path.GetDirectoryName(isoDestination)!, videos);
+                UpdateOutput();
+            }
             if (output is OutputKind.Iso or OutputKind.Burn && File.Exists(isoDestination) && !SelectDestination()) return;
+            PersistDestinations(isoDestination, folderDestination);
             destination = output == OutputKind.Folder ? folderDestination : isoDestination;
             if (output == OutputKind.Folder && Directory.Exists(destination))
                 throw new IOException("The DVD output folder already exists. Change the save location to create a new DVD folder.");
-            var estimate = await EstimateAsync(tools, videos.ToArray(), token);
             long? available = AvailableCapacityBytes();
             var displayedEstimate = DvdCapacityEstimate.Create(estimate, (TelevisionSystem)Standard.SelectedItem,
                 (DiscSize)Capacity.SelectedItem, available);

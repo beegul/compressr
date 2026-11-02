@@ -93,13 +93,18 @@ public static class DiscWriter
             try
             {
                 string identity = MediaIdentity(drive);
-                dynamic erase = eraseObject = Com("IMAPI2.MsftDiscFormat2Erase");
-                erase.Recorder = recorder;
-                bool supported = (bool)erase.IsRecorderSupported(recorder) && (bool)erase.IsCurrentMediaSupported(recorder);
+                bool needsErase = new DiscInspection(media, false, null).NeedsErase;
+                bool supported = false;
+                if (needsErase)
+                {
+                    dynamic erase = eraseObject = Com("IMAPI2.MsftDiscFormat2Erase");
+                    erase.Recorder = recorder;
+                    supported = (bool)erase.IsRecorderSupported(recorder) && (bool)erase.IsCurrentMediaSupported(recorder);
+                }
                 var current = ReadMedia(recorder, data);
                 if (identity != MediaIdentity(drive) || media != current)
                     throw new IOException("The disc changed during inspection. Try Make DVD again.");
-                return new(media, supported, identity, supported ? null : "IMAPI does not support erasing this recorder/media combination");
+                return new(media, supported, identity, needsErase && !supported ? "IMAPI does not support erasing this recorder/media combination" : null);
             }
             catch (Exception ex) when (ex is COMException or IOException or Win32Exception or InvalidOperationException)
             { return new(media, false, null, ex.Message); }
@@ -216,6 +221,7 @@ public static class DiscWriter
             Marshal.ThrowExceptionForHR(SHCreateStreamOnFileEx(dvd.Path, 0x20, 0, false, null, out stream));
             ReadMedia(recorder, format).Check(dvd.Length);
             progress.Report(new("Burn", null, "Writing and finalising the disc. Do not remove it. This stage cannot be cancelled."));
+            using var updates = new ImapiBurnProgress(formatObject, progress);
             try { format.Write(stream); }
             catch (Exception ex) when (ex is COMException or IOException)
             {

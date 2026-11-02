@@ -63,6 +63,21 @@ public static class DiscMonitorFixture
     }
     public static bool Confirm(PreparedDvd dvd, DvdDrive drive) => true;
 }
+public sealed class BurnEventFixture
+{
+    public int CurrentAction { get; set; } = 4;
+    public int StartLba => 100;
+    public int SectorCount => 1000;
+    public int LastWrittenLba => 599;
+    public int ElapsedTime => 60;
+    public int RemainingTime => 90;
+    public int TotalTime => 150;
+}
+public sealed class ProgressCollector : IProgress<StageProgress>
+{
+    public StageProgress Latest;
+    public void Report(StageProgress value) => Latest = value;
+}
 '@
 $app = [Compressr.App.App]::new()
 $app.InitializeComponent()
@@ -164,6 +179,68 @@ try {
     try {
         Check ($invalidSettingsWindow.FindName('Status').Text.Contains('Could not read saved DVD destinations')) 'Invalid persisted destinations are reported without preventing app startup'
     } finally { $invalidSettingsWindow.Close() }
+    $namingState = Join-Path $testState 'automatic-names'
+    [IO.Directory]::CreateDirectory($namingState) | Out-Null
+    $namingFolder = Join-Path $namingState 'output'
+    [IO.Directory]::CreateDirectory($namingFolder) | Out-Null
+    [IO.File]::WriteAllText((Join-Path $namingState 'dvd-destinations.json'),
+        (@{ Iso = (Join-Path $namingFolder 'Compressr.iso'); Folder = (Join-Path $namingState 'dvd') } | ConvertTo-Json))
+    $namingWindow = $constructor.Invoke([object[]]@([string]$namingState, $titleLookup,
+        [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
+    $priorWindow = $window
+    try {
+        $window = $namingWindow
+        $firstInput = Join-Path $namingState 'Summer holiday.mp4'
+        Invoke-Handler 'AddVideo' @([string]$firstInput)
+        $namingPath = $window.FindName('SavePath')
+        Check ($namingPath.Text -eq (Join-Path $namingFolder 'Summer holiday.iso')) 'Legacy generic name becomes source-based while preserving the chosen folder'
+        Invoke-Handler 'AddVideo' @('https://youtu.be/naming-fixture')
+        $namingJobs = $window.FindName('Inputs')
+        $namedVideo = $namingJobs.SelectedItem
+        $titleRequests[$namedVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('Evening performance', 30))
+        Await-Task ($namedVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
+        Check ($namingPath.Text.EndsWith('Summer holiday and 1 more.iso')) 'Multiple inputs use first source plus count without changing play order'
+        Invoke-Handler 'MoveUp' @($null, [Windows.RoutedEventArgs]::new())
+        Check ($namingPath.Text.EndsWith('Evening performance and 1 more.iso')) 'Reorder picks the new first title for an automatic ISO name'
+        Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new())
+        Invoke-Handler 'AddVideo' @('https://youtu.be/first-title-fixture')
+        $titleVideo = $namingJobs.SelectedItem
+        Invoke-Handler 'MoveUp' @($null, [Windows.RoutedEventArgs]::new())
+        Check ($namingPath.Text.EndsWith('YouTube video and 1 more.iso')) 'Pending first title has a safe visible name'
+        $titleRequests[$titleVideo.Input].SetResult([Compressr.Core.YouTubeInfo]::new('Resolved title', 30))
+        Await-Task ($titleVideo.MetadataAsync($titleLookup, [Threading.CancellationToken]::None))
+        Check ($namingPath.Text.EndsWith('Resolved title and 1 more.iso')) 'Metadata arrival refreshes automatic destination without a video download'
+        Invoke-Handler 'SetFolderDestination' @([string](Join-Path $namingState 'dvd'))
+        $automaticRestored = $constructor.Invoke([object[]]@([string]$namingState, $titleLookup,
+            [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
+        try {
+            $window = $automaticRestored
+            Invoke-Handler 'AddVideo' @([string](Join-Path $namingState 'New session.mp4'))
+            Check ($window.FindName('SavePath').Text -eq (Join-Path $namingFolder 'New session.iso')) 'Automatic filename mode and selected folder persist across restart'
+        } finally { $automaticRestored.Close(); $window = $namingWindow }
+        $customIso = Join-Path $namingFolder 'My own disc.iso'
+        Invoke-Handler 'SetIsoDestination' @([string]$customIso)
+        Invoke-Handler 'AddVideo' @([string](Join-Path $namingState 'Another.mp4'))
+        Check ($namingPath.Text -eq $customIso) 'Explicit custom filename is never overwritten by automatic naming'
+        $namingRestored = $constructor.Invoke([object[]]@([string]$namingState, $titleLookup,
+            [DiscMonitorFixture]::Enumerate, [DiscMonitorFixture]::Inspect))
+        try {
+            $window = $namingRestored
+            Invoke-Handler 'AddVideo' @([string]$firstInput)
+            Check ($window.FindName('SavePath').Text -eq $customIso) 'Explicit custom filename persists across restart and source changes'
+        } finally { $namingRestored.Close(); $window = $namingWindow }
+    } finally { $window = $priorWindow; $namingWindow.Close() }
+    $format = [Activator]::CreateInstance([Type]::GetTypeFromProgID('IMAPI2.MsftDiscFormat2Data'))
+    $eventsType = [Compressr.App.MainWindow].Assembly.GetType('Compressr.App.ImapiBurnProgress')
+    $collector = [ProgressCollector]::new()
+    $events = [Activator]::CreateInstance($eventsType, [object[]]@($format, $collector))
+    try {
+        $eventsType.GetMethod('Update').Invoke($events, [object[]]@($format, [BurnEventFixture]::new()))
+        Check ($collector.Latest.Fraction -eq 0.5 -and $collector.Latest.Detail.Contains('1:30 remaining')) 'Real IMAPI connection point subscribes without a disc write; event bridge renders typed sector/ETA fixture'
+        $badEvent = [object]::new()
+        $eventsType.GetMethod('Update').Invoke($events, [object[]]@($format, $badEvent))
+        Check ($collector.Latest.Fraction -eq $null -and $collector.Latest.Detail.Contains('unavailable')) 'Unreadable progress event is explicit indeterminate progress, never success'
+    } finally { $events.Dispose(); [Runtime.InteropServices.Marshal]::FinalReleaseComObject($format) | Out-Null }
     foreach ($name in @('Source', 'Inputs', 'Estimate', 'Preview', 'RotationLabel', 'Standard', 'Capacity',
         'Output', 'Drives', 'Options', 'BurnOptions', 'StartButton', 'CancelButton', 'Stage', 'Progress', 'Status',
         'WorkspaceTabs', 'SavePath', 'SaveOptions', 'OutputChoiceHint', 'SaveLabel', 'DestinationHint', 'PreparedJobs', 'PreparedPath', 'DiscStatus',
@@ -628,7 +705,8 @@ try {
     Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
     $ui.Output.SelectedIndex = 0
     $window.GetType().GetField('isoDestination', [Reflection.BindingFlags]'Instance,NonPublic').SetValue(
-        $window, [string](Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'Compressr.iso'))
+        $window, [string](Join-Path $testState 'Compressr.iso'))
+    $window.GetType().GetField('automaticIsoName', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, $true)
     Invoke-Handler 'UpdateOutput' @()
     while ($ui.Inputs.Items.Count -gt 0) { Invoke-Handler 'RemoveInput' @($null, [Windows.RoutedEventArgs]::new()) }
     foreach ($number in @(1, 2, 3)) {
@@ -639,6 +717,11 @@ try {
     Await-Estimate
     $ui.Inputs.SelectedIndex = 1
     Layout 1008 921
+    Check ($ui.SavePath.Text.EndsWith('Generated sample video 1 and 2 more.iso')) 'Visible automatic destination uses source title and clip count'
+    $ui.Stage.Text = 'Ready'
+    $ui.Status.Text = 'Generated metadata fixtures only. No user video is downloaded and no disc is written.'
+    Layout 1008 921
+    Screenshot 'source-based-iso-name.png'
     Invoke-Handler 'Busy' @($true)
     $reporter = Invoke-Handler 'Reporter' @()
     $value = [Compressr.Core.DownloadProgress]::Parse(
@@ -649,6 +732,10 @@ try {
     Check ($ui.Stage.Text -eq 'Download' -and $ui.Progress.Value -eq 25 -and !$ui.Progress.IsIndeterminate -and
         $ui.Status.Text.Contains('Video 2 of 3') -and $ui.Status.Text.Contains('ETA 0:38')) 'Native UI displays real parsed bytes/percent/speed/ETA and clip identity'
     Screenshot 'download-progress.png'
+    $reporter.Report([Compressr.Core.DownloadProgress]::Parse(
+        'COMPRESSR_DOWNLOAD:{"status":"downloading","downloaded_bytes":1000000,"total_bytes":null,"eta":null}', 'Video 2 of 3'))
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Progress.IsIndeterminate -and $ui.Status.Text.Contains('ETA unavailable')) 'Unknown download time is explicit in native UI'
     $reporter.Report([Compressr.Core.DownloadProgress]::Parse('[Merger] Merging video and audio', 'Video 2 of 3 · Generated sample video 2'))
     [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
     Check ($ui.Stage.Text -eq 'Merge' -and $ui.Progress.IsIndeterminate -and $ui.Status.Text.Contains('merging has no percentage')) 'Native merge UI never invents a percentage'
@@ -661,6 +748,40 @@ try {
     Layout 1008 921
     Check ($ui.Status.ActualHeight -le 76 -and $ui.Status.Text.Contains('NOT verified')) 'Detailed CRC recovery stays readable and scrollable without hiding the main action'
     Screenshot 'dvd-read-error.png'
+    [DiscMonitorFixture]::Drives = @($fixtureDrive)
+    [DiscMonitorFixture]::Snapshot = [Compressr.Core.DiscInspection]::new($blank, $false, $null)
+    Await-Task (Invoke-Handler 'RefreshReadinessAsync' @($true, $false))
+    $ui.Output.SelectedIndex = 2
+    Await-Estimate
+    $ui.Stage.Text = 'Disc ready'
+    $ui.Status.Text = 'Blank writable DVD: no erase or separate formatting is needed. This is a no-write fixture preview.'
+    Layout 1008 921
+    Screenshot 'blank-disc-no-erase.png'
+    $window.GetType().GetField('burning', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, $true)
+    Invoke-Handler 'Busy' @($true)
+    $burnSnapshot = [Compressr.Core.BurnProgressSnapshot]::new(4, 100, 1000, 599, 60, 90, 150)
+    $burnUpdate = [Compressr.Core.BurnProgress]::Describe($burnSnapshot)
+    $reporter.Report($burnUpdate)
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Progress.Value -eq 50 -and !$ui.Progress.IsIndeterminate -and $ui.Status.Text.Contains('1:30 remaining') -and !$ui.CancelButton.IsEnabled) 'Main burn UI renders sector percentage and real writer ETA fields without offering unsafe cancellation'
+    $window.Title = 'Compressr - progress fixture (no disc write)'
+    Screenshot 'burn-progress.png'
+    if ($ui.PreparedJobs.Items.Count -gt 0) {
+        $ui.WorkspaceTabs.SelectedIndex = 1
+        $ui.PreparedJobs.SelectedIndex = 0
+        Layout 1008 921
+        Screenshot 'burn-progress-prepared.png'
+        $ui.WorkspaceTabs.SelectedIndex = 0
+    }
+    $reporter.Report([Compressr.Core.BurnProgress]::Describe([Compressr.Core.BurnProgressSnapshot]::new(5, 100, 1000, 1099, 150, 12, 162)))
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Stage.Text.Contains('finalising') -and $ui.Progress.IsIndeterminate -and !$ui.Status.Text.Contains('verified by SHA')) 'Finalisation is a separate stage, not verified success'
+    Screenshot 'burn-finalising.png'
+    $reporter.Report([Compressr.Core.BurnProgress]::Describe([Compressr.Core.BurnProgressSnapshot]::new(6, 100, 1000, 1099, 150, 0, 150)))
+    [Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([Action]{}, [Windows.Threading.DispatcherPriority]::Background)
+    Check ($ui.Status.Text.Contains('not yet verified') -and $ui.Progress.IsIndeterminate) 'Write-complete event still requires strict app read-back'
+    $window.GetType().GetField('burning', [Reflection.BindingFlags]'Instance,NonPublic').SetValue($window, $false)
+    Invoke-Handler 'Busy' @($false)
     Write-Host "PASS: $script:checks native interface assertions (no media downloaded or disc written)"
 } finally {
     $window.Close()

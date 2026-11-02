@@ -76,7 +76,7 @@ internal static class ProgressReadbackTests
             update.Detail.Contains("ETA 0:38"), "real progress fields render clip, percent, bytes, speed and ETA");
         update = DownloadProgress.Parse(DownloadProgress.DownloadPrefix +
             """{"status":"downloading","downloaded_bytes":10,"total_bytes":null,"speed":null,"eta":null}""", clip)!;
-        check(update.Fraction == null && update.Detail.Contains("unknown") && !update.Detail.Contains("ETA"),
+        check(update.Fraction == null && update.Detail.Contains("unknown") && update.Detail.Contains("ETA unavailable"),
             "unknown total/speed/ETA remain honestly indeterminate");
         update = DownloadProgress.Parse(DownloadProgress.DownloadPrefix +
             """{"status":"downloading","downloaded_bytes":50,"total_bytes_estimate":100}""", clip)!;
@@ -94,7 +94,7 @@ internal static class ProgressReadbackTests
         check(DownloadProgress.Parse("[youtube] Downloading webpage", clip) == null, "extractor diagnostics are not fake download updates");
         update = DownloadProgress.Parse(DownloadProgress.DownloadPrefix +
             """{"downloaded_bytes":-1,"total_bytes":0,"speed":"NA","eta":-1}""", clip)!;
-        check(update.Fraction == null && !update.Detail.Contains("ETA") && !update.Detail.Contains("/s"),
+        check(update.Fraction == null && update.Detail.Contains("ETA unavailable") && !update.Detail.Contains("/s"),
             "missing/non-numeric/invalid optional fields do not break progress");
 
         byte[] data = new byte[2 * 1024 * 1024];

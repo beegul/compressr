@@ -32,6 +32,23 @@ internal static class DiscPreparationTests
             check(fake.ErasePrompts == 0 && fake.Erases == 0, "write-once cannot offer destructive preparation");
         }
         foreach (int type in new[] { 7, 10, 13 })
+        foreach (var blankness in new[] { (Physical: true, Logical: false), (Physical: false, Logical: true), (Physical: true, Logical: true) })
+        {
+            var fake = new FakeDisc(new(blank with
+            {
+                Type = type, PhysicallyBlank = blankness.Physical, HeuristicallyBlank = blankness.Logical,
+                CurrentStatus = 3
+            }, false, null));
+            check(await fake.RunAsync() == DiscPreparationResult.Ready && fake.Erases == 0 &&
+                fake.ErasePrompts == 0 && fake.Burns == 1, "writable physically/logically blank RW skips erase even without erase support " + type + " " + blankness);
+        }
+        foreach (int status in new[] { 0, 0x400, 0x2000, 0x8000 })
+        {
+            var fake = new FakeDisc(new(blank with { CurrentStatus = status }, true, "writer:blank"));
+            await RejectAsync<InvalidOperationException>(fake, "blank flags cannot hide unknown/damaged/protected media");
+            check(fake.Erases == 0 && fake.ErasePrompts == 0, "blocking state never causes automatic erasure");
+        }
+        foreach (int type in new[] { 7, 10, 13 })
         {
             var fake = new FakeDisc(recorded with { Media = recorded.Media with { Type = type } });
             check(await fake.RunAsync() == DiscPreparationResult.ErasedAndReady, "supported RW rechecked after preparation " + type);
